@@ -23,7 +23,7 @@ uint16_t media_array[] = {MEDIA_VOLUME_UP, MEDIA_VOLUME_DOWN, MEDIA_BROWSER_HOME
 
 const byte ROWS = 4;
 const byte COLS = 3;
-
+#define COL_PIN_MASK ((1 << D0) + (1 << D1) + (1 << D2))
 char KEYS[ROWS][COLS] = {
 {'1','2','3'},
 {'4','5','6'},
@@ -36,8 +36,11 @@ char HOLD_KEYS[ROWS][COLS] = {
 {REC,'8',AltTab},
 {Backspace,Power,Enter}
 };
-byte rowPins[ROWS] = {2,3,4,5};
-byte colPins[COLS] = {6,7,21};
+byte rowPins[ROWS] = {D6,D5,D4,D3};
+byte colPins[COLS] = {D2,D1,D0};
+
+byte Power_row = D6;
+byte Power_col = D0;
 
 const uint16_t DEBOUNCE_MS  = 50;
 const uint16_t HOLD_TIME = 500;
@@ -58,6 +61,29 @@ uint16_t waitTime    [ROWS][COLS] = {};
 unsigned long now;
 
 bool recording = false;
+
+RTC_DATA_ATTR int bootCount = 0;
+
+/*
+Method to print the reason by which ESP32
+has been awaken from sleep
+*/
+void print_wakeup_reason(){
+  esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch(wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
+    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
+  }
+}
+
 
 void XCTrack(){
     Serial.println("XCTrack");
@@ -110,6 +136,8 @@ void setupKeypad(){
             else waitTime[r][c] = HOLD_TIME;
         }
     }
+    
+    gpio_hold_dis(gpio_num_t(Power_row));
     for (uint8_t c = 0; c < COLS; c++) pinMode(colPins[c], INPUT_PULLUP);
 }
 
@@ -152,11 +180,61 @@ void getKeys(){
         digitalWrite(rowPins[r], HIGH);
     }
 }
+void enterDeepSleep() {
+    Serial.println("Entering Deep Sleep"); 
+    
+    Serial.println("Ending BLEKeyboard");
+  // Shut down Bluetooth cleanly first
+  bleKeyboard.flush();
+  bleKeyboard.end();
 
+  // Small delay to let BT stack finish shutting down
+  delay(100);
+
+    Serial.println("prepare Pins");
+
+  for (int r=0; r< ROWS;r++) {
+    byte row = rowPins[r];
+    if (row == Power_row){
+        pinMode(row, OUTPUT);
+        digitalWrite(row, LOW);
+        gpio_hold_en(gpio_num_t(row));
+    } else {
+
+    pinMode(rowPins[r], INPUT);
+    }
+  }
+
+  // Drive row 3 LOW
+  pinMode(rowPins[0], OUTPUT);
+  digitalWrite(rowPins[0], LOW);
+  for (int c=0; c<COLS; c++) pinMode(colPins[c], INPUT);
+
+//   // Set all cols as pullup inputs
+//   pinMode(4, INPUT_PULLUP);
+//   pinMode(3, INPUT_PULLUP);
+//   pinMode(2, INPUT_PULLUP);
+
+  esp_deep_sleep_enable_gpio_wakeup(BIT(D0), ESP_GPIO_WAKEUP_GPIO_LOW);
+
+  Serial.println("Serial Flush");
+  Serial.flush();
+  delay(100);
+  Serial.println("Going to sleep now");
+  esp_deep_sleep_start();
+}
 void setup() {
     now = 0;
     Serial.begin(9600);
-    Serial.println("Starting BLE work!");
+    delay(2000); //Take some time to open up the Serial Monitor
+
+    //Increment boot number and print it every reboot
+    ++bootCount;
+    Serial.println("Boot number: " + String(bootCount));
+
+    //Print the wakeup reason for ESP32
+    print_wakeup_reason();
+    Serial.println("Starting BLEKeyboard");
 
     bleKeyboard.begin();
 
@@ -168,4 +246,5 @@ void setup() {
 void loop() {
     now = millis();
     getKeys();
+    if (now>10000) enterDeepSleep();
 }  
