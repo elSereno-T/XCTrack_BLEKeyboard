@@ -60,8 +60,6 @@ uint16_t waitTime[ROWS][COLS] = {};
 
 
 
-unsigned long loopCount;
-unsigned long startTime;
 unsigned long now;
 
 bool recording = false;
@@ -168,8 +166,6 @@ void setup() {
     Serial.println("Starting BLE work!");
 
     bleKeyboard.begin();
-    loopCount = 0;
-    startTime = 0;
 
     setupKeypad();
 
@@ -178,12 +174,5 @@ void setup() {
 
 void loop() {
     now = millis();
-    loopCount++;
-    if ( (now-startTime)>5000 ) {
-        Serial.print("Average loops per second = ");
-        Serial.println(loopCount/5);
-        startTime +=5000;
-        loopCount = 0;
-    }
     getKeys();
 }  
