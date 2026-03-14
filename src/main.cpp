@@ -1,29 +1,28 @@
 #include <Arduino.h>
-
 #include <HijelHID_BLEKeyboard.h>
-
-const byte ROWS = 4; //four rows
-const byte COLS = 3; //three columns
 
 #define Vol_p ((char) '+')
 #define Vol_m ((char) '-')
 #define ESC ((char) 'e')
 #define Home ((char) 'h')
 #define Power ((char) 'o')
-#define XCT ((char) 'x')
 #define Backspace ((char) 'b')
 #define Enter ((char) 'n')
 #define ND ((char) ' ')
-#define AltTab ((char) 's')
 #define Tab ((char) 's')
 #define BL ((char) 'l')
-#define REC ((char) 'r')
 
-String key_chars =     String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
+#define XCT ((char) 'x')
+#define REC ((char) 'r')
+#define AltTab ((char) 's')
+
+String key_chars =  String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
 uint8_t key_array[] = {KEY_ESCAPE,   KEY_BACKSPACE,      KEY_POWER,      KEY_RETURN,     KEY_TAB};
-String media_chars =      String(Vol_p) +  String(Vol_m) +    String(Home) +      String(BL);
+String media_chars =     String(Vol_p) +  String(Vol_m) +    String(Home) +      String(BL);
 uint16_t media_array[] = {MEDIA_VOLUME_UP, MEDIA_VOLUME_DOWN, MEDIA_BROWSER_HOME, MEDIA_DISPLAY_BACKLIGHT};
 
+const byte ROWS = 4;
+const byte COLS = 3;
 
 char KEYS[ROWS][COLS] = {
 {'1','2','3'},
@@ -40,34 +39,36 @@ char HOLD_KEYS[ROWS][COLS] = {
 byte rowPins[ROWS] = {2,3,4,5};
 byte colPins[COLS] = {6,7,21};
 
-
-
 const uint16_t DEBOUNCE_MS  = 50;
 const uint16_t HOLD_TIME = 500;
 const uint16_t REPEAT_DELAY = 200;
 const uint16_t REPEAT_ACCELERATION  = 20;
-const uint16_t REPEAT_MAX_RATE  = 100;
+const uint16_t REPEAT_MAX_RATE  = 50;
 
 HijelHID_BLEKeyboard bleKeyboard("XCTrack Keypad", "TS", 50);
 
-bool     keyState[ROWS][COLS]   = {};
-bool     lastState[ROWS][COLS]  = {};
-uint32_t pressTime[ROWS][COLS]  = {};
-uint32_t changeTime[ROWS][COLS] = {};
-uint32_t lastRepeat[ROWS][COLS] = {};
+bool     keyState    [ROWS][COLS] = {};
+bool     lastState   [ROWS][COLS] = {};
 bool     repeatButton[ROWS][COLS] = {};
-uint16_t waitTime[ROWS][COLS] = {};
-
-
+uint32_t pressTime   [ROWS][COLS] = {};
+uint32_t changeTime  [ROWS][COLS] = {};
+uint32_t lastRepeat  [ROWS][COLS] = {};
+uint16_t waitTime    [ROWS][COLS] = {};
 
 unsigned long now;
 
 bool recording = false;
 
+void XCTrack(){
+    Serial.println("XCTrack");
+    bleKeyboard.print("XCTrack");
+}
+
 void ALT_TAB(){
-        bleKeyboard.press(KEY_LALT);
-        bleKeyboard.press(KEY_TAB);
-        bleKeyboard.releaseAll();
+    Serial.println("Alt + Tab");
+    bleKeyboard.press(KEY_LALT);
+    bleKeyboard.press(KEY_TAB);
+    bleKeyboard.releaseAll();
 }
 
 void Toggle_Recording(){
@@ -83,15 +84,16 @@ void Toggle_Recording(){
 }
 
 void sendKey( char KEY){
-    Serial.print(KEY);
-    Serial.print('\n');
 
-    if (KEY == XCT) bleKeyboard.print("XCTRACK");
+    if (KEY == XCT) XCTrack();
     else if (KEY == AltTab) ALT_TAB();
     else if (KEY == REC) Toggle_Recording();
-    else if (key_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(key_array[key_chars.indexOf(String(KEY))]);
-    else if (media_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(media_array[media_chars.indexOf(String(KEY))]);
-    else bleKeyboard.write((uint8_t)KEY);
+    else {
+        Serial.println(KEY);
+        if (key_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(key_array[key_chars.indexOf(String(KEY))]);
+        else if (media_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(media_array[media_chars.indexOf(String(KEY))]);
+        else bleKeyboard.write((uint8_t)KEY);
+    }
 }
 
 
