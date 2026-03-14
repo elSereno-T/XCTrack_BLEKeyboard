@@ -98,68 +98,59 @@ void sendKey( char KEY){
 
 
 void setupKeypad(){
-      for (uint8_t r = 0; r < ROWS; r++) {
-    pinMode(rowPins[r], OUTPUT);
-    digitalWrite(rowPins[r], HIGH);
-  for (uint8_t c = 0; c < COLS; c++){
-     repeatButton[r][c] = (KEYS[r][c] == HOLD_KEYS[r][c]) ;
-     changeTime[r][c] = 0;
-     keyState[r][c] = false;
-     lastState[r][c] = false;
-     if (repeatButton[r][c]) waitTime[r][c] = REPEAT_DELAY;
-     else waitTime[r][c] = HOLD_TIME;
-  }
-  }
-  for (uint8_t c = 0; c < COLS; c++)
-    pinMode(colPins[c], INPUT_PULLUP);
+    for (uint8_t r = 0; r < ROWS; r++) {
+        pinMode(rowPins[r], OUTPUT);
+        digitalWrite(rowPins[r], HIGH);
+        for (uint8_t c = 0; c < COLS; c++){
+            repeatButton[r][c] = (KEYS[r][c] == HOLD_KEYS[r][c]) ;
+            changeTime[r][c] = 0;
+            keyState[r][c] = false;
+            lastState[r][c] = false;
+            if (repeatButton[r][c]) waitTime[r][c] = REPEAT_DELAY;
+            else waitTime[r][c] = HOLD_TIME;
+        }
+    }
+    for (uint8_t c = 0; c < COLS; c++) pinMode(colPins[c], INPUT_PULLUP);
 }
 
 void getKeys(){
 
-  for (uint8_t r = 0; r < ROWS; r++) {
-    digitalWrite(rowPins[r], LOW);
-    delayMicroseconds(10);
-    for (uint8_t c = 0; c < COLS; c++) {
-        // if (changeTime[r][c] - now < DEBOUNCE_MS){continue;}
-      bool pressed = (digitalRead(colPins[c]) == LOW);
-      if (pressed != lastState[r][c]) {
-        delay(DEBOUNCE_MS);
-        pressed = (digitalRead(colPins[c]) == LOW);
-        if (pressed != lastState[r][c])
-        lastState[r][c] = pressed;
-      }
-      
-      if (pressed && !keyState[r][c]) {
-        keyState[r][c] = true;
-        pressTime[r][c] = lastRepeat[r][c] = now;
-        // Serial.printf("Key: %c\n", keys[r][c]);
-        // sendKey(keys[r][c]);
-      } else if (!pressed && keyState[r][c]) {
-        keyState[r][c] = false;
-        if (now - pressTime[r][c] < min(HOLD_TIME, waitTime[r][c])) sendKey(KEYS[r][c]);
-        if (repeatButton[r][c]) waitTime[r][c] = REPEAT_DELAY;
-        else waitTime[r][c] = HOLD_TIME;
-      } else if (pressed && keyState[r][c]) {
-        if ((now - lastRepeat[r][c]) >= waitTime[r][c]){
-            lastRepeat[r][c] += waitTime[r][c];
-            sendKey(HOLD_KEYS[r][c]);
-            if (repeatButton[r][c]){
-                // sendKey(KEYS[r][c]);
-                waitTime[r][c] = max(int(REPEAT_MAX_RATE), int(waitTime[r][c] - REPEAT_ACCELERATION));
-            }
-            else {
-                waitTime[r][c] = HOLD_TIME * 2;
+    for (uint8_t r = 0; r < ROWS; r++) {
+        digitalWrite(rowPins[r], LOW);
+        delayMicroseconds(10);
+        for (uint8_t c = 0; c < COLS; c++) {
+            bool pressed = (digitalRead(colPins[c]) == LOW);
+            if (pressed != lastState[r][c]) {
+                delay(DEBOUNCE_MS);
+                pressed = (digitalRead(colPins[c]) == LOW);
+                if (pressed != lastState[r][c])
+                lastState[r][c] = pressed;
+            }   
+                
+            if (pressed && !keyState[r][c]) {
+                keyState[r][c] = true;
+                pressTime[r][c] = lastRepeat[r][c] = now;
+            } else if (!pressed && keyState[r][c]) {
+                keyState[r][c] = false;
+                if (now - pressTime[r][c] < min(HOLD_TIME, waitTime[r][c])) sendKey(KEYS[r][c]);
+                if (repeatButton[r][c]) waitTime[r][c] = REPEAT_DELAY;
+                else waitTime[r][c] = HOLD_TIME;
+            } else if (pressed && keyState[r][c]) {
+                if ((now - lastRepeat[r][c]) >= waitTime[r][c]){
+                    lastRepeat[r][c] += waitTime[r][c];
+                    sendKey(HOLD_KEYS[r][c]);
+                    if (repeatButton[r][c]){
+                        waitTime[r][c] = max(int(REPEAT_MAX_RATE), int(waitTime[r][c] - REPEAT_ACCELERATION));
+                    }
+                    else {
+                        waitTime[r][c] = HOLD_TIME * 2;
+                    }
+                }
             }
         }
-        // if ((now - pressTime[r][c]) > REPEAT_DELAY &&
-        //     (now - lastRepeat[r][c]) > REPEAT_RATE) {
-        //   lastRepeat[r][c] = now;
-        //   sendKey(keys[r][c]);
-        }
-      }
-    
-    digitalWrite(rowPins[r], HIGH);
-  }
+        
+        digitalWrite(rowPins[r], HIGH);
+    }
 }
 
 void setup() {
