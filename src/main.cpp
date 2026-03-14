@@ -5,32 +5,38 @@
 const byte ROWS = 4; //four rows
 const byte COLS = 3; //three columns
 
-// uint16_t KEYS[ROWS][COLS] = {
-//     {KEY_1, KEY_2, KEY_3},
-//     {KEY_4, KEY_5, KEY_6},
-//     {KEY_7, KEY_8, KEY_9},
-//     {MEDIA_VOLUME_DOWN, KEY_0, MEDIA_VOLUME_UP},
-// };
-// uint16_t HOLD_KEYS[ROWS][COLS] = {
-//     {KEY_ESCAPE, KEY_2, MEDIA_BROWSER_HOME},
-//     {KEY_4, KEY_5, KEY_6},
-//     {KEY_7, KEY_8, KEY_9},
-//     {MEDIA_VOLUME_DOWN, KEY_0, MEDIA_VOLUME_UP},
+#define Vol_p ((char) '+')
+#define Vol_m ((char) '-')
+#define ESC ((char) 'e')
+#define Home ((char) 'h')
+#define Power ((char) 'o')
+#define XCT ((char) 'x')
+#define Backspace ((char) 'b')
+#define Enter ((char) 'n')
+#define ND ((char) ' ')
+#define AltTab ((char) 's')
+#define Tab ((char) 's')
+#define BL ((char) 'l')
+#define REC ((char) 'r')
 
-// };
-char keys[ROWS][COLS] = {
+String key_chars =     String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
+uint8_t key_array[] = {KEY_ESCAPE,   KEY_BACKSPACE,      KEY_POWER,      KEY_RETURN,     KEY_TAB};
+String media_chars =      String(Vol_p) +  String(Vol_m) +    String(Home) +      String(BL);
+uint16_t media_array[] = {MEDIA_VOLUME_UP, MEDIA_VOLUME_DOWN, MEDIA_BROWSER_HOME, MEDIA_DISPLAY_BACKLIGHT};
+
+
+char KEYS[ROWS][COLS] = {
 {'1','2','3'},
 {'4','5','6'},
 {'7','8','9'},
-{'*','0','#'}
+{Vol_m,'0',Vol_p}
 };
-char hold_keys[ROWS][COLS] = {
-{'a','2','c'},
-{'4','e','6'},
-{'g','8','i'},
-{'j','k','l'}
+char HOLD_KEYS[ROWS][COLS] = {
+{ESC,'2',Home},
+{'4',XCT,'6'},
+{REC,'8',AltTab},
+{Backspace,Power,Enter}
 };
-String repeat_keys = "2468";
 byte rowPins[ROWS] = {2,3,4,5};
 byte colPins[COLS] = {6,7,21};
 
@@ -58,52 +64,45 @@ unsigned long loopCount;
 unsigned long startTime;
 unsigned long now;
 
+bool recording = false;
 
-void sendKey(char c) {
-    Serial.printf("Key: %c\n", c);
-    if (!bleKeyboard.isConnected()) return;
-    switch (c)
-    {
-    case '#':
-        bleKeyboard.tap(MEDIA_VOLUME_UP);
-        break;
-    case '*':
-        bleKeyboard.tap(MEDIA_VOLUME_DOWN);
-        break;
-    case 'k':
-        // bleKeyboard.tap(MEDIA_SLEEP);
-        bleKeyboard.tap(KEY_POWER);
-        break;
-    case 'l':
-        bleKeyboard.tap(KEY_RETURN);
-        break;
-    case 'j':
-        bleKeyboard.tap(KEY_BACKSPACE);
-        break;
-    case 'c':
-        bleKeyboard.tap(MEDIA_BROWSER_HOME);
-        break;
-    case 'a':
-        bleKeyboard.tap(KEY_ESCAPE);
-    //     // bleKeyboard.tap(KEY_APPLICATION);
-    //     // bleKeyboard.tap(MEDIA_TASK_MANAGER);
-    //     bleKeyboard.tap(MEDIA_BROWSER_FORWARD);
-        break;
-    case 'e':
-        bleKeyboard.print("XCTRACK");
-        break;
-    default:
-        bleKeyboard.write((uint8_t)c);
-        break;
-    }                        
+void ALT_TAB(){
+        bleKeyboard.press(KEY_LALT);
+        bleKeyboard.press(KEY_TAB);
+        bleKeyboard.releaseAll();
 }
+
+void Toggle_Recording(){
+    if (recording) {
+        Serial.println("Stop Recording");
+        recording = false;
+    }
+    else {
+        
+        Serial.println("Start Recording");
+        recording = true;
+    }
+}
+
+void sendKey( char KEY){
+    Serial.print(KEY);
+    Serial.print('\n');
+
+    if (KEY == XCT) bleKeyboard.print("XCTRACK");
+    else if (KEY == AltTab) ALT_TAB();
+    else if (KEY == REC) Toggle_Recording();
+    else if (key_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(key_array[key_chars.indexOf(String(KEY))]);
+    else if (media_chars.indexOf(String(KEY))>-1)bleKeyboard.tap(media_array[media_chars.indexOf(String(KEY))]);
+    else bleKeyboard.write((uint8_t)KEY);
+}
+
 
 void setupKeypad(){
       for (uint8_t r = 0; r < ROWS; r++) {
     pinMode(rowPins[r], OUTPUT);
     digitalWrite(rowPins[r], HIGH);
   for (uint8_t c = 0; c < COLS; c++){
-     repeatButton[r][c] = (repeat_keys.indexOf(keys[r][c]) > -1);
+     repeatButton[r][c] = (KEYS[r][c] == HOLD_KEYS[r][c]) ;
      changeTime[r][c] = 0;
      keyState[r][c] = false;
      lastState[r][c] = false;
@@ -137,18 +136,18 @@ void getKeys(){
         // sendKey(keys[r][c]);
       } else if (!pressed && keyState[r][c]) {
         keyState[r][c] = false;
-        if (now - pressTime[r][c] < min(HOLD_TIME, waitTime[r][c])) sendKey(keys[r][c]);
+        if (now - pressTime[r][c] < min(HOLD_TIME, waitTime[r][c])) sendKey(KEYS[r][c]);
         if (repeatButton[r][c]) waitTime[r][c] = REPEAT_DELAY;
         else waitTime[r][c] = HOLD_TIME;
       } else if (pressed && keyState[r][c]) {
         if ((now - lastRepeat[r][c]) >= waitTime[r][c]){
             lastRepeat[r][c] += waitTime[r][c];
+            sendKey(HOLD_KEYS[r][c]);
             if (repeatButton[r][c]){
-                sendKey(keys[r][c]);
+                // sendKey(KEYS[r][c]);
                 waitTime[r][c] = max(int(REPEAT_MAX_RATE), int(waitTime[r][c] - REPEAT_ACCELERATION));
             }
             else {
-                sendKey(hold_keys[r][c]);
                 waitTime[r][c] = HOLD_TIME * 2;
             }
         }
@@ -173,6 +172,7 @@ void setup() {
     startTime = 0;
 
     setupKeypad();
+
 }
 
 
