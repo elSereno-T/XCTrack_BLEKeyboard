@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <HijelHID_BLEKeyboard.h>
-#include <Key.h>
-#define makeKeymap(x) ((char*)x)
+#include <Keypad.h>
 
 #define Vol_p ((char) '+')
 #define Vol_m ((char) '-')
@@ -55,6 +54,7 @@ const byte Power_row = 3;
 const byte confirm_row = 1;
 const byte Power_col = 1;
 
+const uint8_t power_row_GPIOs[] = {row_GPIOs[Power_row],row_GPIOs[confirm_row] };
 const uint8_t power_row_GPIO = row_GPIOs[Power_row];
 const uint8_t confirm_row_GPIO = row_GPIOs[confirm_row];
 const uint8_t power_col_GPIO = col_GPIOs[Power_col];
@@ -68,13 +68,6 @@ const uint16_t POWER_CYCLE_DELAY = 3000;
 
 HijelHID_BLEKeyboard bleKeyboard("XCTrack Keypad", "TS", 50);
 
-// bool     keyState    [ROWS][COLS] = {};
-// bool     lastState   [ROWS][COLS] = {};
-// bool     repeatButton[ROWS][COLS] = {};
-// uint32_t pressTime   [ROWS][COLS] = {};
-// uint32_t changeTime  [ROWS][COLS] = {};
-// uint32_t lastRepeat  [ROWS][COLS] = {};
-// uint16_t waitTime    [ROWS][COLS] = {};
 
 unsigned long now;
 
@@ -85,6 +78,9 @@ RTC_DATA_ATTR int bootCount = 0;
 
 Key PowerKey  ;// = keypad[Power_row][Power_col];
 Key ConfirmKey;// = keypad[confirm_row][Power_col];
+
+Keypad MainKeyPad;
+Keypad PowerKeyPad;
 
 /*
 Method to print the reason by which ESP32
@@ -151,6 +147,37 @@ void sendKey( char KEY){
     }
 }
 
+void setupRows(uint8_t *GPIOs, byte n_rows){
+    for (byte ii=0; ii<n_rows; ii++){
+        pinMode(GPIOs[ii], OUTPUT);
+        digitalWrite(GPIOs[ii], HIGH);
+    }
+
+}
+void setupCols(uint8_t *GPIOs, byte n_cols){
+    for (byte ii=0; ii<n_cols; ii++){
+        pinMode(GPIOs[ii], INPUT_PULLUP);
+    }
+}
+
+// Key setupKeypad(uint8_t *row_GPIOs, uint8_t *col_GPIOs, byte n_rows, byte n_cols, uint16_t DEBOUNCE_MS, uint16_t HOLD_TIME, uint16_t REPEAT_DELAY, uint16_t REPEAT_ACCELERATION, uint16_t REPEAT_MAX_RATE){
+//     char keyMap[n_rows][n_cols];
+//     char altKeyMap[n_rows][n_cols];
+
+// }
+
+// Key setupKeypad(char* keyMap, char* altKeyMap, uint8_t *row_GPIOs, uint8_t *col_GPIOs, byte n_rows, byte n_cols, String no_repeat, uint16_t DEBOUNCE_MS, uint16_t HOLD_TIME, uint16_t REPEAT_DELAY, uint16_t REPEAT_ACCELERATION, uint16_t REPEAT_MAX_RATE){
+//     setupRows(row_GPIOs, n_rows);
+//     setupCols(col_GPIOs, n_cols);
+//     Key keypad[n_rows][n_cols];
+
+
+// }
+
+void SetupPowerPad(){
+    PowerKeyPad.init((uint8_t*)power_row_GPIOs, power_col_GPIO, (byte)2);
+
+}
 
 void setupKeypad(){
     for (uint8_t r = 0; r < ROWS; r++) {
@@ -307,7 +334,7 @@ void setup() {
     Serial.begin(9600);
     // delay(2000); //Take some time to open up the Serial Monitor
     changeState(INITIAL_BOOT);
-    
+    // SetupPowerPad();
     setupKeypad();
     while ((millis()-now)<(POWER_CYCLE_DELAY/2)){delay(10);}
     //Increment boot number and print it every reboot
