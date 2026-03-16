@@ -76,33 +76,9 @@ unsigned long pre_shutdown_release = 0;
 
 RTC_DATA_ATTR int bootCount = 0;
 
-Key PowerKey  ;// = keypad[Power_row][Power_col];
-Key ConfirmKey;// = keypad[confirm_row][Power_col];
+Key PowerKey  ;
+Key ConfirmKey;
 
-// Keypad MainKeyPad;
-// Keypad PowerKeyPad;
-
-/*
-Method to print the reason by which ESP32
-has been awaken from sleep
-*/
-esp_sleep_wakeup_cause_t print_wakeup_reason(){
-  esp_sleep_wakeup_cause_t wakeup_reason;
-
-  wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  switch(wakeup_reason)
-  {
-    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
-    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
-    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
-    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
-    case ESP_SLEEP_WAKEUP_GPIO : Serial.println("Wakeup caused by GPIO"); break;
-    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
-  }
-  return wakeup_reason;
-}
 
 
 void changeState(KeyboardState nextState){
@@ -149,11 +125,6 @@ void sendKey( char KEY){
     }
 }
 
-// void sendKeys(String KEYS){
-//     for (auto c:KEYS) {
-//         sendKey(char(c));
-//     }
-// }
 void setupRows(uint8_t *GPIOs, byte n_rows){
     for (byte ii=0; ii<n_rows; ii++){
         pinMode(GPIOs[ii], OUTPUT);
@@ -167,27 +138,8 @@ void setupCols(uint8_t *GPIOs, byte n_cols){
     }
 }
 
-// Key setupKeypad(uint8_t *row_GPIOs, uint8_t *col_GPIOs, byte n_rows, byte n_cols, uint16_t DEBOUNCE_MS, uint16_t HOLD_TIME, uint16_t REPEAT_DELAY, uint16_t REPEAT_ACCELERATION, uint16_t REPEAT_MAX_RATE){
-//     char keyMap[n_rows][n_cols];
-//     char altKeyMap[n_rows][n_cols];
-
-// }
-
-// Key setupKeypad(char* keyMap, char* altKeyMap, uint8_t *row_GPIOs, uint8_t *col_GPIOs, byte n_rows, byte n_cols, String no_repeat, uint16_t DEBOUNCE_MS, uint16_t HOLD_TIME, uint16_t REPEAT_DELAY, uint16_t REPEAT_ACCELERATION, uint16_t REPEAT_MAX_RATE){
-//     setupRows(row_GPIOs, n_rows);
-//     setupCols(col_GPIOs, n_cols);
-//     Key keypad[n_rows][n_cols];
-
-
-// }
-
-// void SetupPowerPad(){
-//     PowerKeyPad.init((uint8_t*)power_row_GPIOs, power_col_GPIO, (byte)2);
-
-// }
 
 void setupKeypad(){
-    // MainKeyPad.init(makeKeymap(KEYS), makeKeymap(ALT_KEYS), (uint8_t*)row_GPIOs, (uint8_t*)col_GPIOs, ROWS, COLS, no_repeat);
     for (uint8_t r = 0; r < ROWS; r++) {
         pinMode(row_GPIOs[r], OUTPUT);
         digitalWrite(row_GPIOs[r], HIGH);
@@ -202,7 +154,6 @@ void setupKeypad(){
 }
 
 void getKeys(){
-    // sendKeys(MainKeyPad.getKeys());
     for (uint8_t r = 0; r < ROWS; r++) {
         digitalWrite(row_GPIOs[r], LOW);
         delayMicroseconds(10);
@@ -224,7 +175,7 @@ void enterDeepSleep() {
     // Small delay to let BT stack finish shutting down
     delay(100);
 
-    Serial.println("prepare Pins");
+    Serial.println("prepare Pins for Wake Up");
 
   for (int r=0; r< ROWS;r++) {
     uint8_t GPIO = row_GPIOs[r];
@@ -238,13 +189,7 @@ void enterDeepSleep() {
     }
   }
 
-  // Drive row 3 LOW
   for (int c=0; c<COLS; c++) pinMode(col_GPIOs[c], INPUT);
-
-//   // Set all cols as pullup inputs
-//   pinMode(4, INPUT_PULLUP);
-//   pinMode(3, INPUT_PULLUP);
-//   pinMode(2, INPUT_PULLUP);
 
   esp_deep_sleep_enable_gpio_wakeup(BIT(power_col_GPIO), ESP_GPIO_WAKEUP_GPIO_LOW);
 
@@ -258,7 +203,6 @@ void enterDeepSleep() {
   esp_deep_sleep_start();
 }
 void shutdown(){
-    // PowerKeyPad.setKey(0);
     PowerKey = keypad[Power_row][Power_col];
     switch (kbdState){
 
@@ -273,8 +217,6 @@ void shutdown(){
                 pre_shutdown_release = now;
                 changeState(WAIT_FOR_CONFIRMATION);
                 Serial.println("Waiting for Confirmation Button");
-                // PowerKeyPad.setKey(1);
-
             }
             break;
         case WAIT_FOR_CONFIRMATION:
@@ -293,7 +235,6 @@ void validate_wake_up_sequence(){
 
     unsigned long windowStart = millis();
     while ((millis()-windowStart)<(POWER_CYCLE_DELAY/2)){delay(10);}
-    print_wakeup_reason();
     changeState(WAIT_FOR_BUTTON_HOLD);
     while (true){
         PowerKey.read(true);
@@ -355,24 +296,21 @@ void setup() {
     changeState(INITIAL_BOOT);
     setupKeypad();
     now = millis();
-    //Increment boot number and print it every reboot
     ++bootCount;
     validate_wake_up_sequence();
     changeState(SETUP);
-    // setupKeypad();
     Serial.println("Boot number: " + String(bootCount));
 
     Serial.println("Starting BLEKeyboard");
-
-    bleKeyboard.begin();
-
+     bleKeyboard.setDebugLevel(HIDLogLevel::Normal);
+   bleKeyboard.begin();
     changeState(RUNNING);
 }
 
 
 void loop() {
     now = millis();
-    bleKeyboard.setBatteryLevel(75);
+    // bleKeyboard.setBatteryLevel(75);
     getKeys();
     shutdown();
 }  
