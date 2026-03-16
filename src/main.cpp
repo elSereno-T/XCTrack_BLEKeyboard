@@ -217,12 +217,11 @@ void enterDeepSleep() {
     Serial.println("Shutdown confirmed");
     Serial.println("Entering Deep Sleep"); 
     Serial.println("Ending BLEKeyboard");
-  // Shut down Bluetooth cleanly first
-  bleKeyboard.flush();
-  bleKeyboard.end();
+    // Shut down Bluetooth cleanly first
+    bleKeyboard.end();
 
-  // Small delay to let BT stack finish shutting down
-  delay(100);
+    // Small delay to let BT stack finish shutting down
+    delay(100);
 
     Serial.println("prepare Pins");
 
@@ -287,15 +286,15 @@ void shutdown(){
             }
 
     }
-    // if (keyState[Power_row][Power_col] && ((now - pressTime[Power_row][Power_col])>POWER_CYCLE_DELAY))  pre_shutdown_release = now;
-    // if (keyState[confirm_row][Power_col] && !keyState[Power_row][Power_col] && ((now - pre_shutdown_release)< POWER_CYCLE_DELAY)) enterDeepSleep();
 }
 
 bool validate_wake_up_sequence(){
-    PowerKeyPad.setKey(0);
-    PowerKeyPad.read();
-    unsigned long hold_start = PowerKeyPad.start;
-    while(!PowerKeyPad.buttonState) {
+    
+    print_wakeup_reason();
+    while ((millis()-now)<(POWER_CYCLE_DELAY/2)){delay(10);}
+    PowerKey.read();
+    unsigned long hold_start = PowerKey.start;
+    while(!PowerKey.buttonState) {
         delay(10);
         PowerKeyPad.read();
         if ((millis()-now)>(POWER_CYCLE_DELAY*3/4)) break;
@@ -338,17 +337,23 @@ bool validate_wake_up_sequence(){
 
 
 }
+void validate_wake_up_reason(){
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO){
+        enterDeepSleep();
+    }
+}
 void setup() {
     gpio_deep_sleep_hold_dis();
     gpio_hold_dis(gpio_num_t(power_row_GPIO));
+    validate_wake_up_reason();
+    now = millis();
     Serial.begin(9600);
     delay(1000);
     now = millis();
     // delay(2000); //Take some time to open up the Serial Monitor
     changeState(INITIAL_BOOT);
     // SetupPowerPad();
-    // setupKeypad();
-    while ((millis()-now)<(POWER_CYCLE_DELAY/2)){delay(10);}
+    setupKeypad();
     //Increment boot number and print it every reboot
     ++bootCount;
     // if (!validate_wake_up_sequence()){
