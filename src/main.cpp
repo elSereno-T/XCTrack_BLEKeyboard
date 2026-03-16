@@ -17,8 +17,8 @@
 #define REC ((char) 'r')
 #define AltTab ((char) 's')
 
-typedef enum {INITIAL_BOOT, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} KeyboardState;
-const String state_String[] = {"INITIAL_BOOT", "WAIT_FOR_CONFIRMATION", "SETUP", "RUNNING", "INITIAL_SHUTDOWN", "SHUTDOWN", "OFF"};
+typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} KeyboardState;
+const String state_String[] = {"INITIAL_BOOT", "WAIT_FOR_BUTTON_HOLD", "WAIT_FOR_BUTTON_RELEASE", "WAIT_FOR_CONFIRMATION", "SETUP", "RUNNING", "INITIAL_SHUTDOWN", "SHUTDOWN", "OFF"};
 KeyboardState kbdState = OFF;
 
 const String key_chars =  String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
@@ -106,6 +106,7 @@ esp_sleep_wakeup_cause_t print_wakeup_reason(){
 
 
 void changeState(KeyboardState nextState){
+    if (kbdState == nextState) return;
     Serial.println("Going from "+state_String[kbdState] + " to " + state_String[nextState]);
     kbdState = nextState;
 }
@@ -206,7 +207,7 @@ void getKeys(){
         digitalWrite(row_GPIOs[r], LOW);
         delayMicroseconds(10);
         for (uint8_t c = 0; c < COLS; c++) {
-            sendKey(keypad[r][c].update(digitalRead(col_GPIOs[c]) == LOW));
+            sendKey(keypad[r][c].read());
         }
         digitalWrite(row_GPIOs[r], HIGH);
     }
@@ -288,54 +289,58 @@ void shutdown(){
     }
 }
 
-bool validate_wake_up_sequence(){
-    
-    print_wakeup_reason();
-    while ((millis()-now)<(POWER_CYCLE_DELAY/2)){delay(10);}
-    PowerKey.read();
-    unsigned long hold_start = PowerKey.start;
-    while(!PowerKey.buttonState) {
-        delay(10);
-        PowerKey.read();
-        if ((millis()-now)>(POWER_CYCLE_DELAY*3/4)) break;
-    }
-    while (PowerKey.buttonState) {
-        if ((millis()-now)>POWER_CYCLE_DELAY) break;
-        delay(10);
-        PowerKey.read();
-    }
-    if (millis() - now < POWER_CYCLE_DELAY) {
-        Serial.println("First key released too early — going back to sleep");
-        return false;
-    }
-    Serial.println("Waiting for Release of Power Button");
-    while (!PowerKey.stateChanged){
-        delay(10);
-        PowerKey.read();
-    }
+void validate_wake_up_sequence(){
 
-    Serial.println("First key released — waiting for second key");
-    changeState(WAIT_FOR_CONFIRMATION);
-    // PowerKeyPad.setKey(1);
     unsigned long windowStart = millis();
-    while ((millis() - windowStart) < (2 * DEBOUNCE_MS)){
-        
-        ConfirmKey.read();
-        delay(10);
-    }
-    while (!ConfirmKey.stateChanged){
-        if (millis() - windowStart > POWER_CYCLE_DELAY) {
-            Serial.println("Second key pressed too late — going back to sleep");
-            return false;
+    while ((millis()-windowStart)<(POWER_CYCLE_DELAY/2)){delay(10);}
+    print_wakeup_reason();
+    changeState(WAIT_FOR_BUTTON_HOLD);
+    while (true){
+        PowerKey.read(true);
+        ConfirmKey.read(true);
+        int windowsize = millis() - windowStart;
+        switch (kbdState){
+            case WAIT_FOR_BUTTON_HOLD:
+                if (PowerKey.buttonState) {//} || (windowsize > POWER_CYCLE_DELAY*3/4)) {
+                    windowStart = millis() - POWER_CYCLE_DELAY/2;
+                    changeState(WAIT_FOR_BUTTON_RELEASE);
+                    Serial.println("Waiting for Release of Power Button");
+                } else if (windowsize>=POWER_CYCLE_DELAY) changeState(SHUTDOWN);
+                break;
+            case WAIT_FOR_BUTTON_RELEASE:
+                if (PowerKey.keyState==RELEASED){
+                    if (windowsize>=POWER_CYCLE_DELAY) {
+                        changeState(WAIT_FOR_CONFIRMATION);
+                        Serial.println("First key released — waiting for second key");
+                        windowStart = millis();
+                    }
+                    else {
+                        changeState(SHUTDOWN);
+                        Serial.println("First key released too early — going back to sleep");
+                    }
+                }
+                break;
+            case WAIT_FOR_CONFIRMATION:
+                if (windowsize > POWER_CYCLE_DELAY) {
+                    changeState(SHUTDOWN);
+                    Serial.println("Second key pressed too late — going back to sleep");
+                } else if (ConfirmKey.stateChanged){
+                    changeState(SETUP);
+                }
+                break;
+            case SHUTDOWN:
+                Serial.println("invalid boot sequence");
+                enterDeepSleep();
+                return;
+                break;
+            case SETUP:
+                if (ConfirmKey.buttonState==IDLE) return;
+                break;
         }
+        if (windowsize > 10000) changeState(SHUTDOWN);
         delay(10);
-        ConfirmKey.read();
+        
     }
-
-    Serial.println("Success");
-    return true;
-
-
 }
 void validate_wake_up_reason(){
     if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO){
@@ -345,22 +350,14 @@ void validate_wake_up_reason(){
 void setup() {
     gpio_deep_sleep_hold_dis();
     gpio_hold_dis(gpio_num_t(power_row_GPIO));
-    validate_wake_up_reason();
-    now = millis();
     Serial.begin(9600);
-    delay(1000);
-    now = millis();
-    // delay(2000); //Take some time to open up the Serial Monitor
+    validate_wake_up_reason();
     changeState(INITIAL_BOOT);
-    // SetupPowerPad();
     setupKeypad();
+    now = millis();
     //Increment boot number and print it every reboot
     ++bootCount;
-    if (!validate_wake_up_sequence()){
-        // delay(2000);
-        Serial.println("invalid boot sequence");
-        enterDeepSleep();
-    }
+    validate_wake_up_sequence();
     changeState(SETUP);
     // setupKeypad();
     Serial.println("Boot number: " + String(bootCount));
