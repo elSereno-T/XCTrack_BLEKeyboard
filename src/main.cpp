@@ -44,7 +44,6 @@ const char ALT_KEYS[ROWS][COLS] = {
     {Backspace,Power,Enter}
 };
 
-// Key keypad[ROWS][COLS];
 
 Keypad KeypadMain;
 Keypad KeypadPower;
@@ -78,9 +77,6 @@ bool recording = false;
 unsigned long pre_shutdown_release = 0;
 
 RTC_DATA_ATTR int bootCount = 0;
-
-Key PowerKey  ;
-Key ConfirmKey;
 
 
 
@@ -136,51 +132,16 @@ void sendKeys(){
     }
 }
 
-// void setupRows(uint8_t *GPIOs, byte n_rows){
-//     for (byte ii=0; ii<n_rows; ii++){
-//         pinMode(GPIOs[ii], OUTPUT);
-//         digitalWrite(GPIOs[ii], HIGH);
-//     }
-
-// }
-// void setupCols(uint8_t *GPIOs, byte n_cols){
-//     for (byte ii=0; ii<n_cols; ii++){
-//         pinMode(GPIOs[ii], INPUT_PULLUP);
-//     }
-// }
 
 
 void setupKeypad(bool mainKB){
     if (mainKB){
         KeypadMain.init(makeKeymap(KEYS), makeKeymap(ALT_KEYS),(uint8_t*)row_GPIOs, (uint8_t*)col_GPIOs, ROWS, COLS, no_repeat);
     } else {
-        KeypadPower.init((uint8_t*)power_row_GPIOs, confirm_row_GPIO, 2);
+        KeypadPower.init((uint8_t*)power_row_GPIOs, power_col_GPIO, 2);
     }
-    // for (uint8_t r = 0; r < ROWS; r++) {
-    //     pinMode(row_GPIOs[r], OUTPUT);
-    //     digitalWrite(row_GPIOs[r], HIGH);
-    //     for (uint8_t c = 0; c < COLS; c++){
-    //         keypad[r][c].init(KEYS[r][c], ALT_KEYS[r][c], row_GPIOs[r], col_GPIOs[c], no_repeat, DEBOUNCE_MS, HOLD_TIME, REPEAT_DELAY, REPEAT_ACCELERATION, REPEAT_MAX_RATE);
-    //     }
-    // }
-    
-    // for (uint8_t c = 0; c < COLS; c++) pinMode(col_GPIOs[c], INPUT_PULLUP);
-    // PowerKey = keypad[Power_row][Power_col];
-    // ConfirmKey = keypad[confirm_row][Power_col];
 }
 
-// void getKeys(bool mainKB){
-//     // for (uint8_t r = 0; r < ROWS; r++) {
-//     //     digitalWrite(row_GPIOs[r], LOW);
-//     //     delayMicroseconds(10);
-//     //     for (uint8_t c = 0; c < COLS; c++) {
-//     //         sendKey(keypad[r][c].read());
-//     //     }
-//     //     digitalWrite(row_GPIOs[r], HIGH);
-//     // }
-//     if (mainKB) KeypadMain.getKeys();
-//     else KeypadPower.getKeys();
-// }
 void enterDeepSleep() {
     
     changeState(SHUTDOWN);
@@ -222,7 +183,6 @@ void enterDeepSleep() {
 }
 void shutdown(){
     KeypadPower.readKey();
-    // PowerKey = keypad[Power_row][Power_col];
     switch (kbdState){
 
         case RUNNING:
@@ -236,11 +196,10 @@ void shutdown(){
                 pre_shutdown_release = now;
                 changeState(WAIT_FOR_CONFIRMATION);
                 Serial.println("Waiting for Confirmation Button");
-                KeypadPower.setKey(1);
+                KeypadPower.readKey(1);
             }
             break;
         case WAIT_FOR_CONFIRMATION:
-            // ConfirmKey = keypad[confirm_row][Power_col];
             if ((now - pre_shutdown_release) > POWER_CYCLE_DELAY){
                 changeState(RUNNING);
                 KeypadPower.setKey(0);
@@ -248,7 +207,6 @@ void shutdown(){
             } else if (KeypadPower.stateChanged){
                 enterDeepSleep();
             }
-
     }
 }
 
@@ -257,11 +215,9 @@ void validate_wake_up_sequence(){
     unsigned long windowStart = millis();
     while ((millis()-windowStart)<(POWER_CYCLE_DELAY/2)){delay(10);}
     changeState(WAIT_FOR_BUTTON_HOLD);
-    KeypadPower.setKey(0);
+    KeypadPower.readKey(0);
     while (true){
         KeypadPower.readKey();
-        // PowerKey.read(true);
-        // ConfirmKey.read(true);
         int windowsize = millis() - windowStart;
         switch (kbdState){
             case WAIT_FOR_BUTTON_HOLD:
@@ -275,7 +231,7 @@ void validate_wake_up_sequence(){
                 if (KeypadPower.keyState==RELEASED){
                     if (windowsize>=POWER_CYCLE_DELAY) {
                         changeState(WAIT_FOR_CONFIRMATION);
-                        KeypadPower.setKey(1);
+                        KeypadPower.readKey(1);
                         Serial.println("First key released — waiting for second key");
                         windowStart = millis();
                     }
@@ -317,16 +273,19 @@ void setup() {
     gpio_hold_dis(gpio_num_t(power_row_GPIO));
     validate_wake_up_reason();
     Serial.begin(9600);
+    delay(1000);
     changeState(INITIAL_BOOT);
     setupKeypad(false);
     now = millis();
     ++bootCount;
     validate_wake_up_sequence();
     changeState(SETUP);
-    KeypadPower.setKey(0);
+    KeypadPower.readKey(0);
     Serial.println("Boot number: " + String(bootCount));
     Serial.println("Starting BLEKeyboard");
     bleKeyboard.setDebugLevel(HIDLogLevel::Normal);
+    bleKeyboard.setKeyGap(1);
+    bleKeyboard.setTapDelay(10);
     bleKeyboard.begin();
     setupKeypad(true);
     changeState(RUNNING);
