@@ -6,8 +6,8 @@
 
 #pragma once
 // Standard BLE Battery Service (Bluetooth SIG)
-#define BATTERY_SERVICE_UUID    "0x180F"
-#define BATTERY_CHAR_UUID       "0x2A19"   // "Battery Level" characteristic
+#define BATTERY_SERVICE_UUID    "180F"
+#define BATTERY_CHAR_UUID       "2A19"   // "Battery Level" characteristic
 
 // ── Custom GATT service UUID ──────────────────────────────────────────────────
 #define SERVICE_UUID        "12345678-1234-1234-1234-1234567890AB"
@@ -20,6 +20,7 @@
 
 // Client advertises this name prefix so the host can identify it during scan
 #define CLIENT_NAME  "RunCam"
+#define HOST_NAME "CentralStation"
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
 #define CMD_START           0x01
