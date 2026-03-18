@@ -4,6 +4,12 @@
 
 #include <Arduino.h>
 
+
+// ── Host GATT services (host acts as peripheral for these) ────────────────────
+#define HOST_SERVICE_UUID           "4fc05c90-6287-4618-93f8-702ba6e440f5"
+#define HOST_NMEA_CHAR_UUID         "dc1ccec6-30a8-4ebc-9210-c7531e7cb4e1"
+
+
 #pragma once
 // Standard BLE Battery Service (Bluetooth SIG)
 #define BATTERY_SERVICE_UUID    "180F"

@@ -12,6 +12,8 @@ struct {
     unsigned long now;
     unsigned long camera;
     unsigned long system;
+    unsigned long nmea;
+    unsigned long hostBatt;
 } timestamps;
 
 
@@ -108,9 +110,91 @@ SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
 bool displayReady=false;
 
 
-// static NimBLEClient*               pClient  = nullptr;
-// static NimBLERemoteCharacteristic* pCmd     = nullptr;
-// static bool                        ackReceived = false;
+// ── Host GATT server (host as peripheral) ─────────────────────────────────────
+static NimBLEServer*         pHostServer   = nullptr;
+static NimBLECharacteristic* pNmeaChar     = nullptr;
+static NimBLECharacteristic* pHostBattChar = nullptr;
+
+// Dummy NMEA values — replace with real data later
+static float  nmeaField1 = 47.123456f;   // e.g. latitude
+static float  nmeaField2 = 11.654321f;   // e.g. longitude
+
+// Host battery — read from ADC or set manually
+static uint8_t hostBattPercent = 85;
+
+
+void updateNmea() {
+    // Build the NMEA sentence with 50 fields
+    // Fields 1-2 have dummy values, rest are empty placeholders
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+        "$XCTOD"
+        ",%.6f"    // field1
+        ",%.6f"    // field2
+        ",,,,,,,,"  // fields 3-10
+        ",,,,,,,,,,"  // fields 11-20
+        ",,,,,,,,,,"  // fields 21-30
+        ",,,,,,,,,,"  // fields 31-40
+        ",,,,,,,,,,"  // fields 41-50
+        "\r\n",
+        nmeaField1,
+        nmeaField2
+    );
+
+    if (pNmeaChar) {
+        pNmeaChar->setValue((uint8_t*)buf, strlen(buf));
+        pNmeaChar->notify();
+        Serial.printf("[HOST] NMEA sent: %s", buf);
+    }
+}
+
+void updateHostBattery() {
+    hostBattPercent = 100 - (timestamps.now / (10*60*10))%100;;
+    if (pHostBattChar) {
+        pHostBattChar->setValue(&hostBattPercent, 1);
+        pHostBattChar->notify();
+        Serial.printf("[HOST] Battery sent: %d%%\n", hostBattPercent);
+    }
+}
+
+void setupHostGattServer() {
+    // NimBLE already init'd by bleKeyboard.begin() — just create server
+    pHostServer = NimBLEDevice::createServer();
+
+    // ── NMEA service ──────────────────────────────────────────────────────────
+    NimBLEService* pNmeaService = pHostServer->createService(HOST_SERVICE_UUID);
+
+    pNmeaChar = pNmeaService->createCharacteristic(
+        HOST_NMEA_CHAR_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+    );
+
+    // Set initial dummy value
+    const char* initNmea = "$XCTOD,47.123456,11.654321,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,\r\n";
+    pNmeaChar->setValue((uint8_t*)initNmea, strlen(initNmea));
+    pNmeaService->start();
+
+    // ── Battery service (standard 0x180F) ─────────────────────────────────────
+    NimBLEService* pBattService = pHostServer->createService(BATTERY_SERVICE_UUID);
+
+    pHostBattChar = pBattService->createCharacteristic(
+        BATTERY_CHAR_UUID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+    );
+
+    pHostBattChar->setValue(&hostBattPercent, 1);
+    pBattService->start();
+
+    // ── Add services to keyboard advertising ──────────────────────────────────
+    // bleKeyboard already started advertising — add our UUIDs to it
+    NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
+    pAdv->stop();
+    pAdv->addServiceUUID(HOST_SERVICE_UUID);
+    pAdv->addServiceUUID(BATTERY_SERVICE_UUID);
+    pAdv->start();
+
+    Serial.println("[HOST] GATT server ready.");
+}
 
 const char* knownMacs[] = { "98:3d:ae:ab:e2:7a" , "98:3d:ae:ac:92:9a" };
 
@@ -634,6 +718,9 @@ void setup() {
     changeState(CAMERA_DISCONNECTED);
     setupKeypad(false);
     timestamps.now = millis();
+
+    timestamps.nmea     = timestamps.now;
+    timestamps.hostBatt = timestamps.now;
     ++bootCount;
     validate_wake_up_sequence();
     changeState(SETUP);
@@ -648,6 +735,7 @@ void setup() {
     bleKeyboard.begin();
     Serial.printf("[HOST] Free heap after BLE init: %d bytes\n", ESP.getFreeHeap());
     NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
+    setupHostGattServer();
     Serial.printf("[HOST] MAC: %s\n", NimBLEDevice::getAddress().toString().c_str());
     setupKeypad(true);
     // RecordingState();
@@ -655,7 +743,23 @@ void setup() {
     // changeState(RUNNING);
     // changeState(CAMERAS_CONNECTING);
 }
+void updateHostServices() {
+    // Update NMEA every 1 second
+    if (timestamps.now - timestamps.nmea > 1000) {
+        timestamps.nmea = timestamps.now;
+        // Update dummy values — replace with real sensor data later
+        nmeaField1 += 0.000001f;   // simulate moving
+        nmeaField2 += 0.000001f;
+        updateNmea();
+    }
 
+    // Update host battery every 30 seconds
+    if (timestamps.now - timestamps.hostBatt > 30000) {
+        timestamps.hostBatt = timestamps.now;
+        // TODO: replace with real ADC read
+        updateHostBattery();
+    }
+}
 
 void loop() {
     timestamps.now = millis();
@@ -664,4 +768,5 @@ void loop() {
     ConnectAll();
     sendKeys();
     shutdown();
+    updateHostServices();
 }  
