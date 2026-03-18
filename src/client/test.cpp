@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#include "../shared.h"
+#include <shared.h>
 
 static NimBLECharacteristic* pAckChar = nullptr;
 static bool connected = false;
@@ -63,7 +63,7 @@ void setup() {
     NimBLEAdvertisementData scanResponse;
     scanResponse.setName(CLIENT_NAME);
     pAdv->setScanResponseData(scanResponse);  // name in scan response
-    
+
     pAdv->start();
 
     Serial.println("[CLIENT] Advertising...");
