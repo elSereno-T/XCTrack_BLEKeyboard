@@ -1,6 +1,16 @@
 #include <Arduino.h>
+#include <NimBLEDevice.h>
 #include <HijelHID_BLEKeyboard.h>
 #include <Keypad.h>
+#include <shared.h>
+
+
+struct {
+    unsigned long now;
+    unsigned long camera;
+    unsigned long system;
+} timestamps;
+
 
 #define Vol_p ((char) '+')
 #define Vol_m ((char) '-')
@@ -17,15 +27,18 @@
 #define REC ((char) 'r')
 #define AltTab ((char) 's')
 
-typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} KeyboardState;
-const String state_String[] = {"INITIAL_BOOT", "WAIT_FOR_BUTTON_HOLD", "WAIT_FOR_BUTTON_RELEASE", "WAIT_FOR_CONFIRMATION", "SETUP", "RUNNING", "INITIAL_SHUTDOWN", "SHUTDOWN", "OFF"};
-KeyboardState kbdState = OFF;
+typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} SystemState;
+const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT FOR TIME", "WAIT FOR BUTTON RELEASE", "WAIT FOR CONFIRMATION", "SETUP", "RUNNING", "INITIAL SHUTDOWN", "SHUTDOWN", "OFF"};
+SystemState sysState = OFF;
+
+
+
 
 const String key_chars =  String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
 const uint8_t key_array[] = {KEY_ESCAPE,   KEY_BACKSPACE,      KEY_POWER,      KEY_RETURN,     KEY_TAB};
 const String media_chars =     String(Vol_p) +  String(Vol_m) +    String(Home) +      String(BL);
 const uint16_t media_array[] = {MEDIA_VOLUME_UP, MEDIA_VOLUME_DOWN, MEDIA_BROWSER_HOME, MEDIA_DISPLAY_BACKLIGHT};
-const String no_repeat = String(Power) + String(AltTab) + String(Enter)+ String(Home) + String(REC) + String(ESC) + String(XCT);
+const String no_repeat = String(Power) + String(AltTab) + String(Enter)+ String(Home) + String(REC) + String(ESC) + String(XCT) + String(Backspace);
 
 const byte ROWS = 4;
 const byte COLS = 3;
@@ -49,8 +62,8 @@ Keypad KeypadMain;
 Keypad KeypadPower;
 
 
-const uint8_t row_GPIOs[ROWS] = {D6,D5,D4,D3};
-const uint8_t col_GPIOs[COLS] = {D2,D1,D0};
+const uint8_t row_GPIOs[ROWS] = {D10,D9,D8,D7};
+const uint8_t col_GPIOs[COLS] = {D3,D1,D0};
 
 const byte Power_row = 3;
 const byte confirm_row = 1;
@@ -71,7 +84,8 @@ const uint16_t POWER_CYCLE_DELAY = 3000;
 HijelHID_BLEKeyboard bleKeyboard("XCTrack Keypad", "TS", 50);
 
 
-unsigned long now;
+// unsigned long now;
+
 
 bool recording = false;
 unsigned long pre_shutdown_release = 0;
@@ -79,12 +93,105 @@ unsigned long pre_shutdown_release = 0;
 RTC_DATA_ATTR int bootCount = 0;
 
 
+#include <Wire.h>
+#include <SSD1306Wire.h>
 
-void changeState(KeyboardState nextState){
-    if (kbdState == nextState) return;
-    Serial.println("Going from "+state_String[kbdState] + " to " + state_String[nextState]);
-    kbdState = nextState;
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+
+SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
+
+bool displayReady=false;
+
+
+void cleardisp(int startx, int starty, int lx, int ly)
+{
+  display.setColor(BLACK);
+  display.fillRect(startx, starty, lx, ly);
+  display.setColor(WHITE);
 }
+void cleardisp(void)
+{
+  cleardisp(0, 0, 128, 32);
+}
+void displine(int line, String text, char align = 'l', int size = 10, bool clear_line = false)
+{
+
+  int start = 0;
+  int cx1 = 0;
+  switch (size)
+  {
+  case 10:
+    display.setFont(ArialMT_Plain_10);
+    break;
+  case 16:
+    display.setFont(ArialMT_Plain_16);
+    break;
+  case 24:
+    display.setFont(ArialMT_Plain_24);
+    break;
+  default:
+    display.setFont(ArialMT_Plain_10);
+    break;
+  }
+  int strwidth = display.getStringWidth(text);
+  switch (align)
+  {
+  case 'l':
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    cx1 = start;
+    break;
+  case 'c':
+    display.setTextAlignment(TEXT_ALIGN_CENTER);
+    start = 63;
+    cx1 = start - strwidth / 2;
+    break;
+  case 'r':
+    display.setTextAlignment(TEXT_ALIGN_RIGHT);
+    start = 127;
+    cx1 = start - strwidth;
+    break;
+  default:
+    break;
+  }
+  if (clear_line)
+  {
+    cleardisp(0, line * size, 127, size);
+  }
+  else
+  {
+    cleardisp(cx1, line * size, strwidth, size);
+  }
+  display.drawString(start, line * size, text);
+}
+
+void hello_world(){
+    if (!displayReady) return;
+    display.setFont(ArialMT_Plain_10);
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+    display.drawString(0,0,"Hello world!");
+    display.display();
+
+}
+void changeState(String prevState, String nextState, byte line, unsigned long& ts, byte size=10){
+    if (prevState == nextState) return;
+    ts = timestamps.now;
+    Serial.println("Going from "+ prevState + " to " + nextState);
+    if (displayReady) {
+        displine(line, nextState, 'c', size, true);
+        display.display();
+    }
+
+}
+void changeState(SystemState nextState){
+    changeState(SystemStateString[sysState], SystemStateString[nextState],0, timestamps.system);
+    sysState = nextState;
+}
+void changeState(CameraState nextState){
+    changeState(CameraStateString[camState], CameraStateString[nextState],1, timestamps.camera);
+    camState = nextState;
+}
+
 
 void XCTrack(){
     Serial.println("XCTrack");
@@ -110,6 +217,42 @@ void Toggle_Recording(){
     }
 }
 
+void RecordingState(){
+    static NimBLEScan* pScan = nullptr;
+    switch (camState){
+        case CAMERA_DISCONNECTED:{
+            if ((timestamps.now - timestamps.camera)>2000) {
+
+                Serial.println("[HOST] Starting client scan...");
+                changeState(CAMERA_SCANNING);
+            }
+            break;}
+        case CAMERA_SCANNING:{
+                    // Scan still running — check if it's done
+            if ((timestamps.now - timestamps.camera)>2000) 
+            {
+            if (pScan->isScanning()) break;
+
+            Serial.println("[HOST] Scan complete.");
+            changeState(CAMERA_CONNECTING);}
+            break;}
+        case CAMERA_CONNECTING:{
+            changeState(CAMERA_READY);
+            break;}
+        case CAMERA_READY:{
+            if (recording) changeState(CAMERA_BOOTING);
+            break;}
+        case CAMERA_BOOTING:{
+            if ((timestamps.now - timestamps.camera)>2000) changeState(CAMERA_RECORDING);
+            break;}
+        case CAMERA_RECORDING:{
+            if (!recording) changeState(CAMERA_SHUTDOWN);
+            break;}
+        case CAMERA_SHUTDOWN:{
+            if ((timestamps.now - timestamps.camera)>2000) changeState(CAMERA_READY);
+            break;}
+    }
+}
 
 void sendKey( char KEY){
     if (KEY == 0) return;
@@ -150,6 +293,10 @@ void enterDeepSleep() {
     Serial.println("Ending BLEKeyboard");
     // Shut down Bluetooth cleanly first
     bleKeyboard.end();
+    display.displayOff();
+    Wire.end();                        // release SDA/SCL
+    pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
+    pinMode(SCL, INPUT);
 
     // Small delay to let BT stack finish shutting down
     delay(100);
@@ -182,8 +329,13 @@ void enterDeepSleep() {
   esp_deep_sleep_start();
 }
 void shutdown(){
+    // if (KeypadMain.anyPress){
+    //     changeState(RUNNING);
+    //     return;
+
+    // }
     KeypadPower.readKey();
-    switch (kbdState){
+    switch (sysState){
 
         case RUNNING:
             if (KeypadPower.veryLongPress(POWER_CYCLE_DELAY)){
@@ -191,16 +343,15 @@ void shutdown(){
                 Serial.println("Waiting for Release of Power Button");
             }
             break;
-        case INITIAL_SHUTDOWN:
-            if (KeypadPower.keyState == RELEASED){
-                pre_shutdown_release = now;
+        case INITIAL_SHUTDOWN:if (KeypadPower.keyState == RELEASED){
+                pre_shutdown_release = timestamps.now;
                 changeState(WAIT_FOR_CONFIRMATION);
                 Serial.println("Waiting for Confirmation Button");
                 KeypadPower.readKey(1);
             }
             break;
         case WAIT_FOR_CONFIRMATION:
-            if ((now - pre_shutdown_release) > POWER_CYCLE_DELAY){
+            if ((timestamps.now - pre_shutdown_release) > POWER_CYCLE_DELAY){
                 changeState(RUNNING);
                 KeypadPower.setKey(0);
                 Serial.println("Confirmation didn't happen in time");
@@ -219,26 +370,29 @@ void validate_wake_up_sequence(){
     while (true){
         KeypadPower.readKey();
         int windowsize = millis() - windowStart;
-        switch (kbdState){
+        switch (sysState){
             case WAIT_FOR_BUTTON_HOLD:
                 if (KeypadPower.buttonState) {//} || (windowsize > POWER_CYCLE_DELAY*3/4)) {
                     windowStart = millis() - POWER_CYCLE_DELAY/2;
-                    changeState(WAIT_FOR_BUTTON_RELEASE);
+                    changeState(INITIAL_BOOT);
                     Serial.println("Waiting for Release of Power Button");
                 } else if (windowsize>=POWER_CYCLE_DELAY) changeState(SHUTDOWN);
                 break;
-            case WAIT_FOR_BUTTON_RELEASE:
-                if (KeypadPower.keyState==RELEASED){
-                    if (windowsize>=POWER_CYCLE_DELAY) {
-                        changeState(WAIT_FOR_CONFIRMATION);
-                        KeypadPower.readKey(1);
-                        Serial.println("First key released — waiting for second key");
-                        windowStart = millis();
-                    }
-                    else {
+            case INITIAL_BOOT:
+                if (windowsize>=POWER_CYCLE_DELAY) {
+                    changeState(WAIT_FOR_BUTTON_RELEASE);
+                }   else if (KeypadPower.keyState==RELEASED){
                         changeState(SHUTDOWN);
                         Serial.println("First key released too early — going back to sleep");
-                    }
+                }
+                break;
+                
+            case WAIT_FOR_BUTTON_RELEASE:
+                if (KeypadPower.keyState==RELEASED){
+                    changeState(WAIT_FOR_CONFIRMATION);
+                    KeypadPower.readKey(1);
+                    Serial.println("First key released — waiting for second key");
+                    windowStart = millis();
                 }
                 break;
             case WAIT_FOR_CONFIRMATION:
@@ -271,14 +425,16 @@ void validate_wake_up_reason(){
 void setup() {
     gpio_deep_sleep_hold_dis();
     gpio_hold_dis(gpio_num_t(power_row_GPIO));
-    validate_wake_up_reason();
+    // validate_wake_up_reason();
     Serial.begin(9600);
-    delay(1000);
+    displayReady = display.init();
+    timestamps.now = millis();
     changeState(INITIAL_BOOT);
+    changeState(CAMERA_DISCONNECTED);
     setupKeypad(false);
-    now = millis();
+    timestamps.now = millis();
     ++bootCount;
-    validate_wake_up_sequence();
+    // validate_wake_up_sequence();
     changeState(SETUP);
     KeypadPower.readKey(0);
     Serial.println("Boot number: " + String(bootCount));
@@ -289,12 +445,14 @@ void setup() {
     bleKeyboard.begin();
     setupKeypad(true);
     changeState(RUNNING);
+    // changeState(CAMERAS_CONNECTING);
 }
 
 
 void loop() {
-    now = millis();
+    timestamps.now = millis();
     // bleKeyboard.setBatteryLevel(75);
     sendKeys();
+    RecordingState();
     shutdown();
 }  
