@@ -6,7 +6,7 @@
 uint8_t battPct;
 uint8_t battPctPrev;
 static NimBLECharacteristic* pBattChar  = nullptr;   // set during setup()
-#define BATT_UPDATE_INTERVAL_MS         5000         // every 5 seconds
+#define BATT_UPDATE_INTERVAL_MS         10000         // every 5 seconds
 
 // ── State ─────────────────────────────────────────────────────────────────────
 static NimBLEServer*         pServer    = nullptr;
@@ -129,6 +129,8 @@ void setup() {
     Serial.begin(BAUD);
     delay(INITIAL_DELAY);
     timestamps.now = millis();
+    timestamps.battery = timestamps.now;
+    timestamps.camera = timestamps.now;
     Serial.println("[CLIENT] Starting...");
     changeState(CAMERA_OFF);
 
@@ -141,7 +143,7 @@ void setup() {
         // Battery Service (standard 0x180F)
     NimBLEService* pBattService = pServer->createService(BATTERY_SERVICE_UUID);
 
-    NimBLECharacteristic* pBattChar = pBattService->createCharacteristic(
+    pBattChar = pBattService->createCharacteristic(
         BATTERY_CHAR_UUID,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
