@@ -5,6 +5,9 @@
 #include <shared.h>
 
 
+uint16_t NextTryDelta = 5000;
+#define TIMEOUT_MS 5000
+
 struct {
     unsigned long now;
     unsigned long camera;
@@ -29,6 +32,7 @@ struct {
 
 typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} SystemState;
 const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT FOR TIME", "WAIT FOR BUTTON RELEASE", "WAIT FOR CONFIRMATION", "SETUP", "RUNNING", "INITIAL SHUTDOWN", "SHUTDOWN", "OFF"};
+const String ShortSystemStateString[] = {"WAIT", "WAIT","WAIT", "RELEASE", "CONFIRM", "SETUP", "RUNNING", "RELEASE", "SHUTDOWN", "OFF"};
 SystemState sysState = OFF;
 
 
@@ -104,6 +108,181 @@ SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
 bool displayReady=false;
 
 
+// static NimBLEClient*               pClient  = nullptr;
+// static NimBLERemoteCharacteristic* pCmd     = nullptr;
+// static bool                        ackReceived = false;
+
+const char* knownMacs[] = { "98:3d:ae:ab:e2:7a" , "98:3d:ae:ac:92:9a" };
+
+const int   knownMacCount = sizeof(knownMacs) / sizeof(knownMacs[0]);
+
+
+struct BleClient {
+    NimBLEClient*               pClient     = nullptr;
+    NimBLERemoteCharacteristic* pCmd        = nullptr;
+    NimBLERemoteCharacteristic* pAck        = nullptr;
+    NimBLERemoteCharacteristic* pBatt       = nullptr;
+    uint8_t                     ackValue    = 0;
+    bool                        ackReceived = false;
+    bool                        waitingForAck = false;
+    uint8_t                     battPercent = 255;   // 255 = unknown
+    bool                        newbattvalue = false;
+    bool                        connected   = false;
+    unsigned long               nextTry     = 0;
+    unsigned long               commandSent = 0;         
+};
+
+static BleClient clients[knownMacCount];
+void sendCmd(uint8_t cmd) {
+    Serial.printf("[HOST] Sent CMD: 0x%02X\n", cmd);
+    for (int i = 0; i < knownMacCount; i++) {
+        if (!clients[i].connected) continue;
+        clients[i].ackReceived = false;
+        clients[i].waitingForAck = true;
+        clients[i].commandSent = timestamps.now;
+        clients[i].pCmd->writeValue(&cmd, 1, false);
+    }
+}
+
+bool waitForAck(byte ACK_MSG) {
+    bool any = false;
+    bool all = true;
+    for (int i = 0; i < knownMacCount; i++) {
+        if (!clients[i].waitingForAck) continue;
+        if (clients[i].ackReceived && (clients[i].ackValue == ACK_MSG)){
+            Serial.printf("[HOST] ACK received from client %d.\n", i);
+            clients[i].waitingForAck = false;
+            any = true;
+        } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_MS)){
+            Serial.printf("[HOST] ACK timeout for client %d.\n", i);
+            clients[i].waitingForAck = false;
+
+        } else all = false;
+    }
+    return (any || all);
+}
+
+// ── Client callbacks ──────────────────────────────────────────────────────────
+class ClientCallbacks : public NimBLEClientCallbacks {
+    void onConnect(NimBLEClient* pClient) override {
+        // find which index this client is
+        for (int i = 0; i < knownMacCount; i++) {
+            if (clients[i].pClient == pClient) {
+                Serial.printf("[HOST] Client %d connected.\n", i);
+                return;
+            }
+        }
+    }
+
+    void onDisconnect(NimBLEClient* pClient, int reason) override {
+        for (int i = 0; i < knownMacCount; i++) {
+            if (clients[i].pClient == pClient) {
+                Serial.printf("[HOST] Client %d disconnected! Reason: %d\n", i, reason);
+                // Clear characteristics — they're invalid after disconnect
+                clients[i].pCmd        = nullptr;
+                clients[i].pAck        = nullptr;
+                clients[i].pBatt       = nullptr;
+                clients[i].ackReceived = false;
+                clients[i].battPercent = 255;
+                clients[i].connected   = false;
+                clients[i].nextTry     = timestamps.now;
+                // Don't delete pClient here — do it when reconnecting
+                return;
+            }
+        }
+    }
+};
+
+static ClientCallbacks clientCallbacks; 
+bool connectToClient(int idx) {
+     
+    Serial.printf("[HOST] directly connecting to %s...\n", knownMacs[idx]);
+
+    NimBLEClient* pC = NimBLEDevice::createClient();
+        pC->setClientCallbacks(&clientCallbacks, false);  // false = don't delete on disconnect
+        pC->setConnectTimeout(2000);  // short timeout — don't wait long
+
+    if (!pC->connect(NimBLEAddress(knownMacs[idx], BLE_ADDR_PUBLIC))) {
+        Serial.printf("[HOST] Direct connect failed: %s\n", knownMacs[idx]);
+        NimBLEDevice::deleteClient(pC);
+        return false;
+    }
+    Serial.printf("[HOST] Connected to: %s\n", knownMacs[idx]);
+
+    // ── CMD / ACK service ─────────────────────────────────────────────────────
+    NimBLERemoteService* pSvc = pC->getService(SERVICE_UUID);
+    if (!pSvc) {
+        Serial.printf("[HOST] Service not found on %s\n", knownMacs[idx]);
+        pC->disconnect();
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* pCmd = pSvc->getCharacteristic(CMD_CHAR_UUID);
+    NimBLERemoteCharacteristic* pAck = pSvc->getCharacteristic(ACK_CHAR_UUID);
+    if (!pCmd || !pAck) {
+        Serial.printf("[HOST] Characteristics not found on %s\n", knownMacs[idx]);
+        pC->disconnect();
+        return false;
+    }
+
+    clients[idx].pClient = pC;
+    clients[idx].pCmd    = pCmd;
+    clients[idx].pAck    = pAck;
+
+    // Subscribe to ACK notifications
+    pAck->subscribe(true,
+        [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+            if (!len) return;
+            Serial.printf("[HOST] Client %d ACK: 0x%02X\n", idx, data[0]);
+            clients[idx].ackReceived = true;
+            clients[idx].ackValue = data[0];
+        }
+    );
+
+    // ── Battery service (optional) ────────────────────────────────────────────
+    NimBLERemoteService* pBattSvc = pC->getService(BATTERY_SERVICE_UUID);
+    if (pBattSvc) {
+        NimBLERemoteCharacteristic* pBatt =
+            pBattSvc->getCharacteristic(BATTERY_CHAR_UUID);
+        if (pBatt) {
+            clients[idx].pBatt       = pBatt;
+            clients[idx].battPercent = pBatt->readValue<uint8_t>();
+            Serial.printf("[HOST] Client %d battery: %d%%\n",
+                          idx, clients[idx].battPercent);
+
+            pBatt->subscribe(true,
+                [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+                    if (!len) return;
+                    clients[idx].battPercent = data[0];
+                    Serial.printf("[HOST] Client %d battery update: %d%%\n",
+                                  idx, clients[idx].battPercent);
+                }
+            );
+        }
+    }
+    clients[idx].connected = true;
+    Serial.printf("[HOST] Client %d fully connected.\n", idx);
+    return true;
+
+}
+void callConnectToClient(int idx){
+        if (timestamps.now<clients[idx].nextTry || clients[idx].connected) return;
+        clients[idx].connected = connectToClient(idx);
+        if (!clients[idx].connected) clients[idx].nextTry =timestamps.now +  NextTryDelta;
+}
+void ConnectAll(){
+    for (int i = 0; i < knownMacCount; i++) {
+
+        if (clients[i].pClient && !clients[i].pClient->isConnected()) {
+            Serial.printf("[HOST] Client %d lost, reconnecting...\n", i);
+            NimBLEDevice::deleteClient(clients[i].pClient);
+            clients[i].pClient = nullptr;
+            clients[i].connected = false;
+            clients[i].nextTry = timestamps.now-1;
+        }
+        callConnectToClient(i);
+    }
+}
 void cleardisp(int startx, int starty, int lx, int ly)
 {
   display.setColor(BLACK);
@@ -114,7 +293,8 @@ void cleardisp(void)
 {
   cleardisp(0, 0, 128, 32);
 }
-void displine(int line, String text, char align = 'l', int size = 10, bool clear_line = false)
+typedef enum {LEFT, CENTER, RIGHT} ALIGN;
+void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_ALIGN_LEFT, int size = 10, bool clear_line = false)
 {
 
   int start = 0;
@@ -137,16 +317,16 @@ void displine(int line, String text, char align = 'l', int size = 10, bool clear
   int strwidth = display.getStringWidth(text);
   switch (align)
   {
-  case 'l':
+  case TEXT_ALIGN_LEFT:
     display.setTextAlignment(TEXT_ALIGN_LEFT);
     cx1 = start;
     break;
-  case 'c':
+  case TEXT_ALIGN_CENTER:
     display.setTextAlignment(TEXT_ALIGN_CENTER);
     start = 63;
     cx1 = start - strwidth / 2;
     break;
-  case 'r':
+  case TEXT_ALIGN_RIGHT:
     display.setTextAlignment(TEXT_ALIGN_RIGHT);
     start = 127;
     cx1 = start - strwidth;
@@ -165,41 +345,39 @@ void displine(int line, String text, char align = 'l', int size = 10, bool clear
   display.drawString(start, line * size, text);
 }
 
-void hello_world(){
-    if (!displayReady) return;
-    display.setFont(ArialMT_Plain_10);
-    display.setTextAlignment(TEXT_ALIGN_LEFT);
-    display.drawString(0,0,"Hello world!");
-    display.display();
-
-}
-void changeState(String prevState, String nextState, byte line, unsigned long& ts, byte size=10){
+void changeState(String prevState, String nextState, unsigned long& ts){
     if (prevState == nextState) return;
     ts = timestamps.now;
-    Serial.println("Going from "+ prevState + " to " + nextState);
-    if (displayReady) {
-        displine(line, nextState, 'c', size, true);
-        display.display();
-    }
+    Serial.println("[HOST] Going from "+ prevState + " to " + nextState);
 
 }
+void displayState(byte size=10){
+
+    if (displayReady) {
+        displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_LEFT, size, true);
+        displine(0, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, size, false);
+        display.display();
+    }
+}
 void changeState(SystemState nextState){
-    changeState(SystemStateString[sysState], SystemStateString[nextState],0, timestamps.system);
+    changeState(SystemStateString[sysState], SystemStateString[nextState],timestamps.system);
     sysState = nextState;
+    displayState();
 }
 void changeState(CameraState nextState){
-    changeState(CameraStateString[camState], CameraStateString[nextState],1, timestamps.camera);
+    changeState(CameraStateString[camState], CameraStateString[nextState],timestamps.camera);
     camState = nextState;
+    displayState();
 }
 
 
 void XCTrack(){
-    Serial.println("XCTrack");
+    Serial.println("[HOST] XCTrack");
     bleKeyboard.print("XCTrack");
 }
 
 void ALT_TAB(){
-    Serial.println("Alt + Tab");
+    Serial.println("[HOST] Alt + Tab");
     bleKeyboard.press(KEY_LALT);
     bleKeyboard.press(KEY_TAB);
     bleKeyboard.releaseAll();
@@ -207,12 +385,12 @@ void ALT_TAB(){
 
 void Toggle_Recording(){
     if (recording) {
-        Serial.println("Stop Recording");
+        Serial.println("[HOST] Stop Recording");
         recording = false;
     }
     else {
         
-        Serial.println("Start Recording");
+        Serial.println("[HOST] Start Recording");
         recording = true;
     }
 }
@@ -224,32 +402,49 @@ void RecordingState(){
             if ((timestamps.now - timestamps.camera)>2000) {
 
                 Serial.println("[HOST] Starting client scan...");
-                changeState(CAMERA_SCANNING);
+                changeState(CAMERA_CONNECTING);
             }
             break;}
-        case CAMERA_SCANNING:{
-                    // Scan still running — check if it's done
-            if ((timestamps.now - timestamps.camera)>2000) 
-            {
-            if (pScan->isScanning()) break;
+        // case CAMERA_SCANNING:{
+        //             // Scan still running — check if it's done
+        //     if ((timestamps.now - timestamps.camera)>2000) 
+        //     {
+        //     if (pScan->isScanning()) break;
 
-            Serial.println("[HOST] Scan complete.");
-            changeState(CAMERA_CONNECTING);}
-            break;}
+        //     Serial.println("[HOST] Scan complete.");
+        //     changeState(CAMERA_CONNECTING);}
+        //     break;}
         case CAMERA_CONNECTING:{
+            ConnectAll();
             changeState(CAMERA_READY);
+            changeState(RUNNING);
             break;}
         case CAMERA_READY:{
-            if (recording) changeState(CAMERA_BOOTING);
+            waitForAck(ACK_STOPPED);
+            if (recording) {
+                sendCmd(CMD_START);
+                changeState(CAMERA_BOOTING);
+            }
             break;}
         case CAMERA_BOOTING:{
-            if ((timestamps.now - timestamps.camera)>2000) changeState(CAMERA_RECORDING);
+            if (waitForAck(ACK_STARTED)) {
+                
+                bleKeyboard.tap(KEY_R);
+                changeState(CAMERA_RECORDING);
+            }
             break;}
         case CAMERA_RECORDING:{
-            if (!recording) changeState(CAMERA_SHUTDOWN);
+            waitForAck(ACK_STARTED);
+            if (!recording) {
+                sendCmd(CMD_STOP);
+                changeState(CAMERA_SHUTDOWN);
+            }
             break;}
         case CAMERA_SHUTDOWN:{
-            if ((timestamps.now - timestamps.camera)>2000) changeState(CAMERA_READY);
+            if (waitForAck(ACK_STOPPED)) {
+                bleKeyboard.tap(KEY_R);
+                changeState(CAMERA_READY);
+            }
             break;}
     }
 }
@@ -285,14 +480,15 @@ void setupKeypad(bool mainKB){
     }
 }
 
-void enterDeepSleep() {
+void enterDeepSleep(bool wait=true) {
     
     changeState(SHUTDOWN);
-    Serial.println("Shutdown confirmed");
-    Serial.println("Entering Deep Sleep"); 
-    Serial.println("Ending BLEKeyboard");
+    Serial.println("[HOST] Shutdown confirmed");
+    Serial.println("[HOST] Entering Deep Sleep"); 
+    Serial.println("[HOST] Ending BLEKeyboard");
     // Shut down Bluetooth cleanly first
     bleKeyboard.end();
+    if (wait) delay(2000);
     display.displayOff();
     Wire.end();                        // release SDA/SCL
     pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
@@ -301,7 +497,7 @@ void enterDeepSleep() {
     // Small delay to let BT stack finish shutting down
     delay(100);
 
-    Serial.println("prepare Pins for Wake Up");
+    Serial.println("[HOST] prepare Pins for Wake Up");
 
   for (int r=0; r< ROWS;r++) {
     uint8_t GPIO = row_GPIOs[r];
@@ -319,13 +515,13 @@ void enterDeepSleep() {
 
   esp_deep_sleep_enable_gpio_wakeup(BIT(power_col_GPIO), ESP_GPIO_WAKEUP_GPIO_LOW);
 
-  Serial.println("Serial Flush");
+  Serial.println("[HOST] Serial Flush");
   Serial.flush();
   delay(100);
-  Serial.println("gpio_deep_sleep_hold_en");
+  Serial.println("[HOST] gpio_deep_sleep_hold_en");
   gpio_deep_sleep_hold_en();
   delay(100);
-  Serial.println("Going to sleep now");
+  Serial.println("[HOST] Going to sleep now");
   esp_deep_sleep_start();
 }
 void shutdown(){
@@ -340,13 +536,13 @@ void shutdown(){
         case RUNNING:
             if (KeypadPower.veryLongPress(POWER_CYCLE_DELAY)){
                 changeState(INITIAL_SHUTDOWN);
-                Serial.println("Waiting for Release of Power Button");
+                Serial.println("[HOST] Waiting for Release of Power Button");
             }
             break;
         case INITIAL_SHUTDOWN:if (KeypadPower.keyState == RELEASED){
                 pre_shutdown_release = timestamps.now;
                 changeState(WAIT_FOR_CONFIRMATION);
-                Serial.println("Waiting for Confirmation Button");
+                Serial.println("[HOST] Waiting for Confirmation Button");
                 KeypadPower.readKey(1);
             }
             break;
@@ -354,7 +550,7 @@ void shutdown(){
             if ((timestamps.now - pre_shutdown_release) > POWER_CYCLE_DELAY){
                 changeState(RUNNING);
                 KeypadPower.setKey(0);
-                Serial.println("Confirmation didn't happen in time");
+                Serial.println("[HOST] Confirmation didn't happen in time");
             } else if (KeypadPower.stateChanged){
                 enterDeepSleep();
             }
@@ -375,7 +571,7 @@ void validate_wake_up_sequence(){
                 if (KeypadPower.buttonState) {//} || (windowsize > POWER_CYCLE_DELAY*3/4)) {
                     windowStart = millis() - POWER_CYCLE_DELAY/2;
                     changeState(INITIAL_BOOT);
-                    Serial.println("Waiting for Release of Power Button");
+                    Serial.println("[HOST] Waiting for Release of Power Button");
                 } else if (windowsize>=POWER_CYCLE_DELAY) changeState(SHUTDOWN);
                 break;
             case INITIAL_BOOT:
@@ -383,7 +579,7 @@ void validate_wake_up_sequence(){
                     changeState(WAIT_FOR_BUTTON_RELEASE);
                 }   else if (KeypadPower.keyState==RELEASED){
                         changeState(SHUTDOWN);
-                        Serial.println("First key released too early — going back to sleep");
+                        Serial.println("[HOST] First key released too early — going back to sleep");
                 }
                 break;
                 
@@ -391,20 +587,20 @@ void validate_wake_up_sequence(){
                 if (KeypadPower.keyState==RELEASED){
                     changeState(WAIT_FOR_CONFIRMATION);
                     KeypadPower.readKey(1);
-                    Serial.println("First key released — waiting for second key");
+                    Serial.println("[HOST] First key released — waiting for second key");
                     windowStart = millis();
                 }
                 break;
             case WAIT_FOR_CONFIRMATION:
                 if (windowsize > POWER_CYCLE_DELAY) {
                     changeState(SHUTDOWN);
-                    Serial.println("Second key pressed too late — going back to sleep");
+                    Serial.println("[HOST] Second key pressed too late — going back to sleep");
                 } else if (KeypadPower.stateChanged){
                     changeState(SETUP);
                 }
                 break;
             case SHUTDOWN:
-                Serial.println("invalid boot sequence");
+                Serial.println("[HOST] invalid boot sequence");
                 enterDeepSleep();
                 return;
                 break;
@@ -419,14 +615,19 @@ void validate_wake_up_sequence(){
 }
 void validate_wake_up_reason(){
     if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO){
-        enterDeepSleep();
+        enterDeepSleep(false);
     }
 }
 void setup() {
     gpio_deep_sleep_hold_dis();
     gpio_hold_dis(gpio_num_t(power_row_GPIO));
     // validate_wake_up_reason();
-    Serial.begin(9600);
+    Serial.begin(BAUD);
+    delay(INITIAL_DELAY);
+    Serial.printf("[HOST] Free heap: %d bytes\n", ESP.getFreeHeap());
+    Serial.printf("[HOST] Min free heap: %d bytes\n", ESP.getMinFreeHeap());
+    Serial.printf("[HOST] knownMacCount: %d\n", knownMacCount);
+    Serial.println("[HOST] Starting...");
     displayReady = display.init();
     timestamps.now = millis();
     changeState(INITIAL_BOOT);
@@ -434,17 +635,24 @@ void setup() {
     setupKeypad(false);
     timestamps.now = millis();
     ++bootCount;
-    // validate_wake_up_sequence();
+    validate_wake_up_sequence();
     changeState(SETUP);
     KeypadPower.readKey(0);
-    Serial.println("Boot number: " + String(bootCount));
-    Serial.println("Starting BLEKeyboard");
+    Serial.println("[HOST] Boot number: " + String(bootCount));
+    Serial.printf("[HOST] Free heap before BLE init: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[HOST] Starting BLEKeyboard");
+
     bleKeyboard.setDebugLevel(HIDLogLevel::Normal);
     bleKeyboard.setKeyGap(1);
     bleKeyboard.setTapDelay(10);
     bleKeyboard.begin();
+    Serial.printf("[HOST] Free heap after BLE init: %d bytes\n", ESP.getFreeHeap());
+    NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
+    Serial.printf("[HOST] MAC: %s\n", NimBLEDevice::getAddress().toString().c_str());
     setupKeypad(true);
-    changeState(RUNNING);
+    // RecordingState();
+    delay(1000);
+    // changeState(RUNNING);
     // changeState(CAMERAS_CONNECTING);
 }
 
@@ -452,7 +660,8 @@ void setup() {
 void loop() {
     timestamps.now = millis();
     // bleKeyboard.setBatteryLevel(75);
-    sendKeys();
     RecordingState();
+    ConnectAll();
+    sendKeys();
     shutdown();
 }  

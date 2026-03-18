@@ -48,18 +48,21 @@ void sendCmd(uint8_t cmd) {
     }
 }
 
-void waitForAck() {
+bool waitForAck() {
+    bool any = false;
     for (int i = 0; i < knownMacCount; i++) {
         if (!clients[i].waitingForAck) continue;
         if (clients[i].ackReceived){
             Serial.printf("[HOST] ACK received from client %d.\n", i);
             clients[i].waitingForAck = false;
+            any = true;
         } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_MS)){
             Serial.printf("[HOST] ACK timeout for client %d.\n", i);
             clients[i].waitingForAck = false;
 
         }
     }
+    return any;
 }
 // ── Client callbacks ──────────────────────────────────────────────────────────
 class ClientCallbacks : public NimBLEClientCallbacks {
