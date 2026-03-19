@@ -12,8 +12,6 @@ struct {
     unsigned long now;
     unsigned long camera;
     unsigned long system;
-    unsigned long nmea;
-    unsigned long hostBatt;
 } timestamps;
 
 
