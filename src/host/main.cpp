@@ -384,7 +384,8 @@ void changeState(CameraState nextState){
 
 void XCTrack(){
     Serial.println("[HOST] XCTrack");
-    bleKeyboard.print("XCTrack");
+    bleKeyboard.tap(KEY_X);
+    bleKeyboard.print("ctrack");
 }
 
 void ALT_TAB(){
