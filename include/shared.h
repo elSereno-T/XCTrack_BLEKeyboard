@@ -24,8 +24,7 @@
 // Client sends a single byte notify here to ACK
 #define ACK_CHAR_UUID       "57a0e065-c8bf-4164-a0d0-48d4858bbbff"
 
-// Client advertises this name prefix so the host can identify it during scan
-#define HOST_NAME "CentralStation"
+
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
 #define CMD_START           0x01
