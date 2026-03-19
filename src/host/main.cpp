@@ -5,7 +5,7 @@
 #include <shared.h>
 
 
-uint16_t NextTryDelta = 5000;
+uint16_t NextTryDelta = 10000;
 #define TIMEOUT_MS 5000
 
 struct {
@@ -267,6 +267,11 @@ void callConnectToClient(int idx){
         if (!clients[idx].connected) clients[idx].nextTry =timestamps.now +  NextTryDelta;
 }
 void ConnectAll(){
+    static unsigned long lastCheck = 0;
+    if (timestamps.now - lastCheck < 500) return;
+    static bool connecting = false;
+    if (connecting) return;
+    lastCheck = timestamps.now;
     for (int i = 0; i < knownMacCount; i++) {
 
         if (clients[i].pClient && !clients[i].pClient->isConnected()) {
@@ -276,7 +281,17 @@ void ConnectAll(){
             clients[i].connected = false;
             clients[i].nextTry = timestamps.now-1;
         }
-        callConnectToClient(i);
+        
+        if (!clients[i].connected &&
+            timestamps.now >= clients[i].nextTry) {
+            connecting = true;
+            clients[i].connected = connectToClient(i);
+            connecting = false;
+            if (!clients[i].connected)
+                clients[i].nextTry = timestamps.now + NextTryDelta;
+            // Only one reconnect attempt per loop cycle
+            return;
+        }
     }
 }
 void cleardisp(int startx, int starty, int lx, int ly)
@@ -424,6 +439,7 @@ void RecordingState(){
             break;}
         case CAMERA_BOOTING:{
             if (waitForAck(ACK_STARTED)) {
+                ConnectAll();
                 
                 bleKeyboard.tap(KEY_R);
                 changeState(CAMERA_RECORDING);
