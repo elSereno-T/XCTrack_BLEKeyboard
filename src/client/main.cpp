@@ -134,7 +134,7 @@ void setup() {
     Serial.println("[CLIENT] Starting...");
     changeState(CAMERA_OFF);
 
-    NimBLEDevice::init(CLIENT_NAME);   // all clients same prefix, host filters by it
+    NimBLEDevice::init("");
     NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
 
     pServer = NimBLEDevice::createServer();
@@ -171,10 +171,7 @@ void setup() {
     // Advertise
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     pAdv->addServiceUUID(SERVICE_UUID);
-    pAdv->enableScanResponse(true);
-    NimBLEAdvertisementData scanResponse;
-    scanResponse.setName(CLIENT_NAME);
-    pAdv->setScanResponseData(scanResponse);  // name in scan response
+    pAdv->enableScanResponse(false);
     pAdv->start();
     Serial.printf("[CLIENT] MAC type: %s\n", NimBLEDevice::getAddress().isPublic() ? "PUBLIC" : "RANDOM");
     Serial.printf("[CLIENT] MAC: %s\n", NimBLEDevice::getAddress().toString().c_str());
