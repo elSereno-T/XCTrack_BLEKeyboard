@@ -4,6 +4,18 @@
 #include <Keypad.h>
 #include <shared.h>
 
+#ifdef __has_include
+  #if __has_include("wifi.h")
+    #include "wifi.h"
+  #endif
+#endif
+#ifndef WIFI_SSID
+    #define WIFI_SSID ""
+#endif
+#ifndef WIFI_PWD
+    #define WIFI_PWD ""
+#endif
+
 
 uint16_t NextTryDelta = 10000;
 #define TIMEOUT_MS 5000
@@ -12,7 +24,21 @@ struct {
     unsigned long now;
     unsigned long camera;
     unsigned long system;
+    unsigned long display;
 } timestamps;
+
+typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, WAIT_FOR_SHUTDOWN_CONFIRMATION, SHUTDOWN, OFF} SystemState;
+const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT FOR TIME", "WAIT FOR BUTTON RELEASE", "WAIT FOR CONFIRMATION", "SETUP", "RUNNING", "INITIAL SHUTDOWN", "WAIT FOR SHUTDOWN CONFIRMATION", "SHUTDOWN", "OFF"};
+const String ShortSystemStateString[] = {"HOLD", "HOLD","HOLD", "RELEASE", "CONFIRM", "SETUP", "RUNNING", "RELEASE", "SHUTDOWN", "OFF"};
+SystemState sysState = OFF;
+
+typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA} DisplayState;
+const String DisplayStateString[] = {"OFF", "SYS_STATE", "CAMERA"};
+DisplayState dispState = DISPLAY_OFF;
+DisplayState prevDispState = DISPLAY_OFF;
+bool updateDisplay = false;
+
+bool anyKey = false;
 
 
 #define Vol_p ((char) '+')
@@ -29,14 +55,6 @@ struct {
 #define XCT ((char) 'x')
 #define REC ((char) 'r')
 #define AltTab ((char) 's')
-
-typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, SHUTDOWN, OFF} SystemState;
-const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT FOR TIME", "WAIT FOR BUTTON RELEASE", "WAIT FOR CONFIRMATION", "SETUP", "RUNNING", "INITIAL SHUTDOWN", "SHUTDOWN", "OFF"};
-const String ShortSystemStateString[] = {"WAIT", "WAIT","WAIT", "RELEASE", "CONFIRM", "SETUP", "RUNNING", "RELEASE", "SHUTDOWN", "OFF"};
-SystemState sysState = OFF;
-
-
-
 
 const String key_chars =  String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
 const uint8_t key_array[] = {KEY_ESCAPE,   KEY_BACKSPACE,      KEY_POWER,      KEY_RETURN,     KEY_TAB};
@@ -78,14 +96,10 @@ const uint8_t power_row_GPIO = row_GPIOs[Power_row];
 const uint8_t confirm_row_GPIO = row_GPIOs[confirm_row];
 const uint8_t power_col_GPIO = col_GPIOs[Power_col];
 
-// const uint16_t DEBOUNCE_MS  = 50;
-// const uint16_t HOLD_TIME = 500;
-// const uint16_t REPEAT_DELAY = 200;
-// const uint16_t REPEAT_ACCELERATION  = 20;
-// const uint16_t REPEAT_MAX_RATE  = 50;
 const uint16_t POWER_CYCLE_DELAY = 3000;
 
 HijelHID_BLEKeyboard bleKeyboard("XCTrack Keypad", "TS", 50);
+bool keyboardAvailable = false;
 
 
 // unsigned long now;
@@ -356,29 +370,79 @@ void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_AL
   display.drawString(start, line * size, text);
 }
 
-void changeState(String prevState, String nextState, unsigned long& ts){
-    if (prevState == nextState) return;
+void changeState(String prevState, String nextState, unsigned long& ts, String ID){
     ts = timestamps.now;
-    Serial.println("[HOST] Going from "+ prevState + " to " + nextState);
+    if (prevState == nextState) return;
+    Serial.println("[HOST] ["+ ID +"] Going from "+ prevState + " to " + nextState);
 
 }
-void displayState(byte size=10){
-
+void displayState(){
     if (displayReady) {
-        displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_LEFT, size, true);
-        displine(0, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, size, false);
+        displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_CENTER, 16, true);
+        displine(2, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, 10, false);
         display.display();
     }
 }
+void displayCamera(){
+    if (displayReady){
+        displine(0,"CAMERA");
+        display.display();
+    }
+}
+void changeState(DisplayState nextState){
+    changeState(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
+    dispState = nextState;
+}
 void changeState(SystemState nextState){
-    changeState(SystemStateString[sysState], SystemStateString[nextState],timestamps.system);
+    changeState(SystemStateString[sysState], SystemStateString[nextState],timestamps.system, "SYSTEM");
     sysState = nextState;
-    displayState();
+    changeState(DISPLAY_SYS_STATE);
 }
 void changeState(CameraState nextState){
-    changeState(CameraStateString[camState], CameraStateString[nextState],timestamps.camera);
+    changeState(CameraStateString[camState], CameraStateString[nextState],timestamps.camera, "CAMERA");
     camState = nextState;
-    displayState();
+}
+
+void turnDisplayOff(){
+    
+    display.displayOff();
+    Wire.end();                        // release SDA/SCL
+    pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
+    pinMode(SCL, INPUT);
+    displayReady = false;
+}
+void turnDisplayOn(){if (!displayReady) displayReady = display.init();}
+
+void updateDisplayState(){
+    if (dispState!=prevDispState) updateDisplay = true;
+    switch (dispState){
+        case (DISPLAY_SYS_STATE):{
+            if ((timestamps.now - timestamps.display) > 3000) {changeState(DISPLAY_CAMERA); break;}
+            if (updateDisplay){displayState();break;}
+            break;
+        }
+        case (DISPLAY_CAMERA):{
+            if ((timestamps.now - timestamps.display) > 10000) changeState(DISPLAY_OFF);
+            if (updateDisplay){displayCamera();break;}
+            break;
+        }
+        case (DISPLAY_OFF):{
+            if (updateDisplay){
+                // turnDisplayOff();
+                display.clear();
+                break;
+            };
+            if (anyKey){
+                turnDisplayOn();
+                changeState(DISPLAY_CAMERA);
+                break;
+            };
+            break;
+        }
+    }
+    updateDisplay = false;
+    prevDispState = dispState;
+
 }
 
 
@@ -406,7 +470,7 @@ void Toggle_Recording(){
     }
 }
 
-void RecordingState(){
+void updateRecordingState(){
     static NimBLEScan* pScan = nullptr;
     switch (camState){
         case CAMERA_DISCONNECTED:{
@@ -458,6 +522,8 @@ void RecordingState(){
                 changeState(CAMERA_READY);
             }
             break;}
+        default:
+            break;
     }
 }
 
@@ -474,38 +540,41 @@ void sendKey( char KEY){
     }
 }
 void sendKeys(){
+    if (!keyboardAvailable) return;
     char* keys = KeypadMain.getKeys();
+    anyKey = false;
     for (byte i = 0; i<(ROWS*COLS); i++){
         if (keys[i] == 0) continue;
+        anyKey = true;
         sendKey(keys[i]);
         keys[i] = char(0);
     }
 }
 
+typedef enum {MAIN, POWER} KeyPadType;
 
-
-void setupKeypad(bool mainKB){
-    if (mainKB){
-        KeypadMain.init(makeKeymap(KEYS), makeKeymap(ALT_KEYS),(uint8_t*)row_GPIOs, (uint8_t*)col_GPIOs, ROWS, COLS, no_repeat);
-    } else {
-        KeypadPower.init((uint8_t*)power_row_GPIOs, power_col_GPIO, 2);
+void setupKeypad(KeyPadType kpt){
+    switch (kpt){
+        case MAIN:{
+            KeypadMain.init(makeKeymap(KEYS), makeKeymap(ALT_KEYS),(uint8_t*)row_GPIOs, (uint8_t*)col_GPIOs, ROWS, COLS, no_repeat);
+            break;
+        }
+        case POWER:{
+            KeypadPower.init((uint8_t*)power_row_GPIOs, power_col_GPIO, 2);
+            break;
+        }
     }
 }
 
 void enterDeepSleep(bool wait=true) {
     
-    changeState(SHUTDOWN);
     Serial.println("[HOST] Shutdown confirmed");
     Serial.println("[HOST] Entering Deep Sleep"); 
     Serial.println("[HOST] Ending BLEKeyboard");
     // Shut down Bluetooth cleanly first
     bleKeyboard.end();
     if (wait) delay(2000);
-    display.displayOff();
-    Wire.end();                        // release SDA/SCL
-    pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
-    pinMode(SCL, INPUT);
-
+    turnDisplayOff();
     // Small delay to let BT stack finish shutting down
     delay(100);
 
@@ -536,95 +605,202 @@ void enterDeepSleep(bool wait=true) {
   Serial.println("[HOST] Going to sleep now");
   esp_deep_sleep_start();
 }
-void shutdown(){
-    // if (KeypadMain.anyPress){
-    //     changeState(RUNNING);
-    //     return;
-
-    // }
-    KeypadPower.readKey();
+void updateSystemState(){
+    unsigned long windowsize = timestamps.now - timestamps.system;
     switch (sysState){
+        case OFF:{
+            setupKeypad(POWER);
+            turnDisplayOn();
+            KeypadPower.readKey(0);
+            changeState(INITIAL_BOOT);
+            changeState(CAMERA_OFF);
+            break;
+        }
 
-        case RUNNING:
+        case INITIAL_BOOT:{
+            KeypadPower.readKey(0);
+            if (windowsize > (POWER_CYCLE_DELAY/2)) changeState(WAIT_FOR_BUTTON_HOLD);
+            break;
+        }
+        case WAIT_FOR_BUTTON_HOLD:{
+            KeypadPower.readKey(0);
+            if (KeypadPower.buttonState) {
+                changeState(WAIT_FOR_BUTTON_RELEASE);
+                timestamps.system -= POWER_CYCLE_DELAY/2;
+                Serial.println("[HOST] Waiting for Release of Power Button");
+                break;
+            }
+            if (windowsize>=POWER_CYCLE_DELAY) {
+                changeState(SHUTDOWN);
+                Serial.println("[HOST] Power Button Push not detected");
+                break;
+            }
+            break;
+        }
+        case WAIT_FOR_BUTTON_RELEASE:{
+            KeypadPower.readKey(0);
+            if (KeypadPower.keyState==RELEASED){
+                changeState(WAIT_FOR_CONFIRMATION);
+                Serial.println("[HOST] First key released — waiting for second key");
+                break;
+                KeypadPower.readKey(1);
+            }
+            break;  
+        }
+        case WAIT_FOR_CONFIRMATION:{
+            KeypadPower.readKey(1);
+            if (windowsize > POWER_CYCLE_DELAY) {
+                changeState(SHUTDOWN);
+                Serial.println("[HOST] Second key pressed too late — going back to sleep");
+                break;
+            }
+            if (KeypadPower.stateChanged){
+                changeState(SETUP);
+                Serial.println("[HOST] Startup Confirmed");
+                break;
+            }
+            break;
+        }
+        case SETUP:{
+            Serial.println("[HOST] Boot number: " + String(bootCount));
+            Serial.printf("[HOST] Free heap before BLE init: %d bytes\n", ESP.getFreeHeap());
+            Serial.println("[HOST] Starting BLEKeyboard");
+
+            bleKeyboard.setDebugLevel(HIDLogLevel::Normal);
+            bleKeyboard.setKeyGap(1);
+            bleKeyboard.setTapDelay(10);
+            bleKeyboard.begin();
+            Serial.printf("[HOST] Free heap after BLE init: %d bytes\n", ESP.getFreeHeap());
+            NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
+            Serial.printf("[HOST] MAC: %s\n", NimBLEDevice::getAddress().toString().c_str());
+            setupKeypad(MAIN);
+            delay(1000);
+            keyboardAvailable = true;
+            changeState(RUNNING);
+            changeState(CAMERA_CONNECTING);
+            KeypadPower.setKey(0);
+            break;
+        }
+        case RUNNING:{
+            sendKeys();
+            KeypadPower.readKey(0);
             if (KeypadPower.veryLongPress(POWER_CYCLE_DELAY)){
                 changeState(INITIAL_SHUTDOWN);
                 Serial.println("[HOST] Waiting for Release of Power Button");
             }
             break;
-        case INITIAL_SHUTDOWN:if (KeypadPower.keyState == RELEASED){
-                pre_shutdown_release = timestamps.now;
-                changeState(WAIT_FOR_CONFIRMATION);
+
+        }
+        case INITIAL_SHUTDOWN:{
+            KeypadPower.readKey(0);
+            if (KeypadPower.keyState == RELEASED){
+                changeState(WAIT_FOR_SHUTDOWN_CONFIRMATION);
                 Serial.println("[HOST] Waiting for Confirmation Button");
-                KeypadPower.readKey(1);
+                for (int i = 0; i<10; i++){
+                    KeypadPower.readKey(1);
+                    delay(10);
+                }
             }
             break;
-        case WAIT_FOR_CONFIRMATION:
-            if ((timestamps.now - pre_shutdown_release) > POWER_CYCLE_DELAY){
+        }
+        case WAIT_FOR_SHUTDOWN_CONFIRMATION:{
+            sendKeys();
+            KeypadPower.readKey(1);
+            if (windowsize<200) break;
+            if (anyKey){
+                changeState(RUNNING);
+                KeypadPower.setKey(0);
+                Serial.println("[HOST] Shutdown canceled by any key");
+                break;
+            }
+            if ((windowsize) > POWER_CYCLE_DELAY){
                 changeState(RUNNING);
                 KeypadPower.setKey(0);
                 Serial.println("[HOST] Confirmation didn't happen in time");
-            } else if (KeypadPower.stateChanged){
-                enterDeepSleep();
-            }
-    }
-}
-
-void validate_wake_up_sequence(){
-
-    unsigned long windowStart = millis();
-    while ((millis()-windowStart)<(POWER_CYCLE_DELAY/2)){delay(10);}
-    changeState(WAIT_FOR_BUTTON_HOLD);
-    KeypadPower.readKey(0);
-    while (true){
-        KeypadPower.readKey();
-        int windowsize = millis() - windowStart;
-        switch (sysState){
-            case WAIT_FOR_BUTTON_HOLD:
-                if (KeypadPower.buttonState) {//} || (windowsize > POWER_CYCLE_DELAY*3/4)) {
-                    windowStart = millis() - POWER_CYCLE_DELAY/2;
-                    changeState(INITIAL_BOOT);
-                    Serial.println("[HOST] Waiting for Release of Power Button");
-                } else if (windowsize>=POWER_CYCLE_DELAY) changeState(SHUTDOWN);
                 break;
-            case INITIAL_BOOT:
-                if (windowsize>=POWER_CYCLE_DELAY) {
-                    changeState(WAIT_FOR_BUTTON_RELEASE);
-                }   else if (KeypadPower.keyState==RELEASED){
-                        changeState(SHUTDOWN);
-                        Serial.println("[HOST] First key released too early — going back to sleep");
-                }
+            } 
+            if (!KeypadPower.buttonState && KeypadPower.stateChanged){
+                changeState(SHUTDOWN);
+                Serial.println("[HOST] Shutdown confirmed");
                 break;
-                
-            case WAIT_FOR_BUTTON_RELEASE:
-                if (KeypadPower.keyState==RELEASED){
-                    changeState(WAIT_FOR_CONFIRMATION);
-                    KeypadPower.readKey(1);
-                    Serial.println("[HOST] First key released — waiting for second key");
-                    windowStart = millis();
-                }
-                break;
-            case WAIT_FOR_CONFIRMATION:
-                if (windowsize > POWER_CYCLE_DELAY) {
-                    changeState(SHUTDOWN);
-                    Serial.println("[HOST] Second key pressed too late — going back to sleep");
-                } else if (KeypadPower.stateChanged){
-                    changeState(SETUP);
-                }
-                break;
-            case SHUTDOWN:
-                Serial.println("[HOST] invalid boot sequence");
-                enterDeepSleep();
-                return;
-                break;
-            case SETUP:
-                if (KeypadPower.buttonState==IDLE) return;
-                break;
+            };
+            break;
         }
-        if (windowsize > 10000) changeState(SHUTDOWN);
-        delay(10);
-        
+        case SHUTDOWN:{
+            enterDeepSleep();
+            break;
+        }
     }
 }
+// void shutdown(){
+//     // if (KeypadMain.anyPress){
+//     //     changeState(RUNNING);
+//     //     return;
+
+//     // }
+//     KeypadPower.readKey();
+//     switch (sysState){
+
+//         case RUNNING:
+//     }
+// }
+
+// void validate_wake_up_sequence(){
+
+//     unsigned long windowStart = millis();
+//     while ((millis()-windowStart)<(POWER_CYCLE_DELAY/2)){delay(10);}
+//     changeState(WAIT_FOR_BUTTON_HOLD);
+//     KeypadPower.readKey(0);
+//     while (true){
+//         KeypadPower.readKey();
+//         int windowsize = millis() - windowStart;
+//         switch (sysState){
+//             case WAIT_FOR_BUTTON_HOLD:
+//                 if (KeypadPower.buttonState) {//} || (windowsize > POWER_CYCLE_DELAY*3/4)) {
+//                     windowStart = millis() - POWER_CYCLE_DELAY/2;
+//                     changeState(INITIAL_BOOT);
+//                     Serial.println("[HOST] Waiting for Release of Power Button");
+//                 } else if (windowsize>=POWER_CYCLE_DELAY) changeState(SHUTDOWN);
+//                 break;
+//             case INITIAL_BOOT:
+//                 if (windowsize>=POWER_CYCLE_DELAY) {
+//                     changeState(WAIT_FOR_BUTTON_RELEASE);
+//                 }   else if (KeypadPower.keyState==RELEASED){
+//                         changeState(SHUTDOWN);
+//                         Serial.println("[HOST] First key released too early — going back to sleep");
+//                 }
+//                 break;
+                
+//             case WAIT_FOR_BUTTON_RELEASE:
+//                 if (KeypadPower.keyState==RELEASED){
+//                     changeState(WAIT_FOR_CONFIRMATION);
+//                     KeypadPower.readKey(1);
+//                     Serial.println("[HOST] First key released — waiting for second key");
+//                     windowStart = millis();
+//                 }
+//                 break;
+//             case WAIT_FOR_CONFIRMATION:
+//                 if (windowsize > POWER_CYCLE_DELAY) {
+//                     changeState(SHUTDOWN);
+//                     Serial.println("[HOST] Second key pressed too late — going back to sleep");
+//                 } else if (KeypadPower.stateChanged){
+//                     changeState(SETUP);
+//                 }
+//                 break;
+//             case SHUTDOWN:
+//                 Serial.println("[HOST] invalid boot sequence");
+//                 enterDeepSleep();
+//                 return;
+//                 break;
+//             case SETUP:
+//                 if (KeypadPower.buttonState==IDLE) return;
+//                 break;
+//         }
+//         if (windowsize > 10000) changeState(SHUTDOWN);
+//         delay(10);
+        
+//     }
+// }
 void validate_wake_up_reason(){
     if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO){
         enterDeepSleep(false);
@@ -640,41 +816,18 @@ void setup() {
     Serial.printf("[HOST] Min free heap: %d bytes\n", ESP.getMinFreeHeap());
     Serial.printf("[HOST] knownMacCount: %d\n", knownMacCount);
     Serial.println("[HOST] Starting...");
-    displayReady = display.init();
-    timestamps.now = millis();
-    changeState(INITIAL_BOOT);
-    changeState(CAMERA_DISCONNECTED);
-    setupKeypad(false);
-    timestamps.now = millis();
     ++bootCount;
-    validate_wake_up_sequence();
-    changeState(SETUP);
-    KeypadPower.readKey(0);
-    Serial.println("[HOST] Boot number: " + String(bootCount));
-    Serial.printf("[HOST] Free heap before BLE init: %d bytes\n", ESP.getFreeHeap());
-    Serial.println("[HOST] Starting BLEKeyboard");
-
-    bleKeyboard.setDebugLevel(HIDLogLevel::Normal);
-    bleKeyboard.setKeyGap(1);
-    bleKeyboard.setTapDelay(10);
-    bleKeyboard.begin();
-    Serial.printf("[HOST] Free heap after BLE init: %d bytes\n", ESP.getFreeHeap());
-    NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
-    Serial.printf("[HOST] MAC: %s\n", NimBLEDevice::getAddress().toString().c_str());
-    setupKeypad(true);
-    // RecordingState();
-    delay(1000);
-    // changeState(RUNNING);
-    // changeState(CAMERAS_CONNECTING);
 }
 
 
 void loop() {
     timestamps.now = millis();
+    updateSystemState();
     // bleKeyboard.setBatteryLevel(75);
-    RecordingState();
-    ConnectAll();
-    sendKeys();
-    shutdown();
+    // updateRecordingState();
+    // ConnectAll();
+    // sendKeys();
+    // shutdown();
+    updateDisplayState();
     delay(10);
 }  
