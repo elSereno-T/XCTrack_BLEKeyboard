@@ -321,6 +321,7 @@ void cleardisp(void)
   cleardisp(0, 0, 128, 32);
 }
 typedef enum {LEFT, CENTER, RIGHT} ALIGN;
+
 void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_ALIGN_LEFT, int size = 10, bool clear_line = false)
 {
 
@@ -374,10 +375,30 @@ void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_AL
 
 void changeState(String prevState, String nextState, unsigned long& ts, String ID){
     ts = timestamps.now;
-    if (prevState == nextState) return;
+    updateDisplay=true;
+    timestamps.display = timestamps.now;
+    if (prevState == nextState) {
+        Serial.println("[HOST] ["+ ID +"] "+ prevState + " requested again.");
+
+        return;
+    }
     Serial.println("[HOST] ["+ ID +"] Going from "+ prevState + " to " + nextState);
 
 }
+
+void turnDisplayOff(){
+    
+    display.displayOff();
+    displayReady = false;
+}
+void endI2C(){
+
+    Wire.end();                        // release SDA/SCL
+    pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
+    pinMode(SCL, INPUT);
+}
+void turnDisplayOn(){if (!displayReady) displayReady = display.init();}
+
 void displayState(){
     if (displayReady) {
         displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_CENTER, 16, true);
@@ -386,13 +407,36 @@ void displayState(){
     }
 }
 void displayCamera(){
+    Serial.printf("[HOST] displayCamera called, displayReady=%d\n", displayReady);
     if (displayReady){
-        displine(0,"CAMERA");
+        display.clear();
+        display.drawRect(112, 3, 16, 29);
+        display.fillRect(116,0,8,4);
+        display.fillRect(113,21,14,10);
+
+        display.drawRect(0,7,20,10);
+        display.drawCircle(5,3,3);
+        display.drawCircle(13,3,3);
+
+        display.drawRect(80,0,16,32);
+        display.clearPixel(80,0);
+        display.clearPixel(96,0);
+        display.clearPixel(80,31);
+        display.clearPixel(95,31);
+        display.fillTriangle(88,5,84,16,88,16);
+        display.fillTriangle(88,27,92,16,88,16);
+
+        // displine(0,"CAMERA");
         display.display();
     }
 }
 void changeState(DisplayState nextState){
     changeState(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
+    if ((dispState == DISPLAY_OFF) && (nextState != DISPLAY_OFF)) {
+        turnDisplayOn();
+    }        
+    cleardisp();
+
     dispState = nextState;
 }
 void changeState(SystemState nextState){
@@ -405,38 +449,33 @@ void changeState(CameraState nextState){
     camState = nextState;
 }
 
-void turnDisplayOff(){
-    
-    display.displayOff();
-    Wire.end();                        // release SDA/SCL
-    pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
-    pinMode(SCL, INPUT);
-    displayReady = false;
-}
-void turnDisplayOn(){if (!displayReady) displayReady = display.init();}
 
 void updateDisplayState(){
-    if (dispState!=prevDispState) updateDisplay = true;
+    unsigned long windowsize = timestamps.now - timestamps.display;
+    if (prevDispState!=dispState) {updateDisplay = true;}
     switch (dispState){
-        case (DISPLAY_SYS_STATE):{
-            if ((timestamps.now - timestamps.display) > 3000) {changeState(DISPLAY_CAMERA); break;}
+        case DISPLAY_SYS_STATE:{
             if (updateDisplay){displayState();break;}
+            if (windowsize > 3000) {changeState(DISPLAY_CAMERA); return; break;}
             break;
         }
-        case (DISPLAY_CAMERA):{
-            if ((timestamps.now - timestamps.display) > 10000) changeState(DISPLAY_OFF);
+        case DISPLAY_CAMERA:{
             if (updateDisplay){displayCamera();break;}
+            if (windowsize > 10000) {changeState(DISPLAY_OFF); return; break;}
             break;
         }
-        case (DISPLAY_OFF):{
+        case DISPLAY_OFF:{
             if (updateDisplay){
-                // turnDisplayOff();
-                display.clear();
+                turnDisplayOff();
+                // cleardisp();
+                // display.display();
+                // display.clear();
                 break;
             };
-            if (anyKey){
-                turnDisplayOn();
+            if (KeypadMain.anyPress){
+                // turnDisplayOn();
                 changeState(DISPLAY_CAMERA);
+                return;
                 break;
             };
             break;
@@ -472,7 +511,7 @@ void Toggle_Recording(){
     }
 }
 
-void updateRecordingState(){
+void updateCameraState(){
     static NimBLEScan* pScan = nullptr;
     switch (camState){
         case CAMERA_DISCONNECTED:{
@@ -577,6 +616,7 @@ void enterDeepSleep(bool wait=true) {
     bleKeyboard.end();
     if (wait) delay(2000);
     turnDisplayOff();
+    endI2C();
     // Small delay to let BT stack finish shutting down
     delay(100);
 
@@ -612,7 +652,7 @@ void updateSystemState(){
     switch (sysState){
         case OFF:{
             setupKeypad(POWER);
-            turnDisplayOn();
+            // turnDisplayOn();
             KeypadPower.readKey(0);
             changeState(INITIAL_BOOT);
             changeState(CAMERA_OFF);
@@ -620,11 +660,13 @@ void updateSystemState(){
         }
 
         case INITIAL_BOOT:{
+            timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
             if (windowsize > (POWER_CYCLE_DELAY/2)) changeState(WAIT_FOR_BUTTON_HOLD);
             break;
         }
         case WAIT_FOR_BUTTON_HOLD:{
+            timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
             if (KeypadPower.buttonState) {
                 changeState(WAIT_FOR_BUTTON_RELEASE);
@@ -640,6 +682,7 @@ void updateSystemState(){
             break;
         }
         case WAIT_FOR_BUTTON_RELEASE:{
+            timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
             if (KeypadPower.keyState==RELEASED){
                 changeState(WAIT_FOR_CONFIRMATION);
@@ -650,6 +693,7 @@ void updateSystemState(){
             break;  
         }
         case WAIT_FOR_CONFIRMATION:{
+            timestamps.display = timestamps.now;
             KeypadPower.readKey(1);
             if (windowsize > POWER_CYCLE_DELAY) {
                 changeState(SHUTDOWN);
@@ -695,10 +739,12 @@ void updateSystemState(){
         }
         case INITIAL_SHUTDOWN:{
             KeypadPower.readKey(0);
+            timestamps.display = timestamps.now;
             if (KeypadPower.keyState == RELEASED){
                 changeState(WAIT_FOR_SHUTDOWN_CONFIRMATION);
                 Serial.println("[HOST] Waiting for Confirmation Button");
                 for (int i = 0; i<10; i++){
+                    sendKeys();
                     KeypadPower.readKey(1);
                     delay(10);
                 }
@@ -708,13 +754,8 @@ void updateSystemState(){
         case WAIT_FOR_SHUTDOWN_CONFIRMATION:{
             sendKeys();
             KeypadPower.readKey(1);
+            timestamps.display = timestamps.now;
             if (windowsize<200) break;
-            if (anyKey){
-                changeState(RUNNING);
-                KeypadPower.setKey(0);
-                Serial.println("[HOST] Shutdown canceled by any key");
-                break;
-            }
             if ((windowsize) > POWER_CYCLE_DELAY){
                 changeState(RUNNING);
                 KeypadPower.setKey(0);
@@ -726,6 +767,12 @@ void updateSystemState(){
                 Serial.println("[HOST] Shutdown confirmed");
                 break;
             };
+            if (anyKey){
+                changeState(RUNNING);
+                KeypadPower.setKey(0);
+                Serial.println("[HOST] Shutdown canceled by any key");
+                break;
+            }
             break;
         }
         case SHUTDOWN:{
@@ -756,8 +803,7 @@ void setup() {
 void loop() {
     timestamps.now = millis();
     updateSystemState();
-    // bleKeyboard.setBatteryLevel(75);
-    // updateRecordingState();
+    updateCameraState();
     // ConnectAll();
     // sendKeys();
     // shutdown();
