@@ -9,16 +9,16 @@
 
 
 // #ifdef __has_include
-  #if __has_include("wifi.h")
-    #include "wifi.h"
-  #endif
-#endif
-#ifndef WIFI_SSID
-    #define WIFI_SSID ""
-#endif
-#ifndef WIFI_PWD
-    #define WIFI_PWD ""
-#endif
+//   #if __has_include("wifi.h")
+//     #include "wifi.h"
+//   #endif
+// #endif
+// #ifndef WIFI_SSID
+//     #define WIFI_SSID ""
+// #endif
+// #ifndef WIFI_PWD
+//     #define WIFI_PWD ""
+// #endif
 
 
 uint16_t NextTryDelta = 10000;
