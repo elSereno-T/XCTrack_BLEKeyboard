@@ -26,7 +26,7 @@ void phone(bool charging, int x0){
     display.clearPixel(x0+15,0);
     display.clearPixel(x0,31);
     display.clearPixel(x0+15,31);
-    if (charging && blink){
+    if (charging){
 
         display.fillTriangle(x0+8,5,x0+4,16,x0+8,16);
         display.fillTriangle(x0+8,27,x0+12,16,x0+8,16);
@@ -82,8 +82,12 @@ void GPS(int x0, bool powered){
         // display.fillTriangle(x0,5,x0-4,16,x0,16);
         // display.fillTriangle(x0,27,x0+4,16,x0,16);
     } else {
-        display.drawLine(x0-r+2,r-4,x0+r-2,36-r);
-        display.drawLine(x0-r+2,36-r,x0+r-2,r-4);
+        // display.drawLine(x0-r+2,r-4,x0+r-2,36-r);
+        // display.drawLine(x0-r+2,36-r,x0+r-2,r-4);
+        display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+        display.drawString(x0,16,"z");
+        display.drawString(x0-4,20,"z");
+        display.drawString(x0+4,10,"Z");
     }
 }
 
