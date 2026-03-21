@@ -4,7 +4,11 @@
 #include <Keypad.h>
 #include <shared.h>
 
-#ifdef __has_include
+#include <Wire.h>
+#include <SSD1306Wire.h>
+
+
+// #ifdef __has_include
   #if __has_include("wifi.h")
     #include "wifi.h"
   #endif
@@ -111,8 +115,6 @@ unsigned long pre_shutdown_release = 0;
 RTC_DATA_ATTR int bootCount = 0;
 
 
-#include <Wire.h>
-#include <SSD1306Wire.h>
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
