@@ -50,11 +50,14 @@ const String GPSStateStateString[] = {"POWER_OFF", "POWER_ON"};
 GPSState GPS_ON_OFF = POWER_OFF;
 
 
-typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA, DISPLAY_REFRESH} DisplayState;
-const String DisplayStateString[] = {"OFF", "SYS_STATE", "CAMERA", "REFRESH"};
+typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA, DISPLAY_SETUP} DisplayState;
+const String DisplayStateString[] = {"OFF", "SYS_STATE", "CAMERA", "SETUP"};
 DisplayState dispState = DISPLAY_OFF;
 DisplayState prevDispState = DISPLAY_OFF;
 bool updateDisplay = false;
+
+#define DISPLAY_REFRESH_RATE 40
+#define DISPLAY_BLINK_RATE 1000
 
 bool anyKey = false;
 
@@ -99,9 +102,17 @@ const char ALT_KEYS[ROWS][COLS] = {
     {Backspace,Power,Enter}
 };
 
+const char MENU_KEYS[ROWS][COLS] = {
+    {ESC,'^',0},
+    {'<',Enter,'>'},
+    {0,'v',0},
+    {0,0,Enter}
+};
+
 
 Keypad KeypadMain;
 Keypad KeypadPower;
+Keypad KeypadMenu;
 
 
 const uint8_t row_GPIOs[ROWS] = {D10,D9,D8,D7};
@@ -525,6 +536,9 @@ void displayCamera(){
         display.display();
     }
 }
+void displayMenu(){
+
+}
 void changeState(DisplayState nextState){
     changeState(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
     if ((dispState == DISPLAY_OFF) && (nextState != DISPLAY_OFF)) {
@@ -550,7 +564,7 @@ void changeState(PhoneState nextState){
 }
 void updateDisplayState(){
     unsigned long windowsize = timestamps.now - timestamps.display;
-    blink = (timestamps.now%1000)<500;
+    blink = (timestamps.now%DISPLAY_BLINK_RATE)<(DISPLAY_BLINK_RATE/2);
     if (prevDispState!=dispState) {updateDisplay = true;}
     switch (dispState){
         case DISPLAY_SYS_STATE:{
@@ -565,7 +579,7 @@ void updateDisplayState(){
         }
         case DISPLAY_CAMERA:{
             if (updateDisplay){displayCamera();break;}
-            if (windowsize>=50){displayCamera();timestamps.display+=50;break;}
+            if (windowsize>=DISPLAY_REFRESH_RATE){displayCamera();timestamps.display+=DISPLAY_REFRESH_RATE;break;}
             if ((timestamps.now - timestamps.display_timeout) > 30000) {changeState(DISPLAY_OFF); return; break;}
             break;
         }
@@ -584,6 +598,11 @@ void updateDisplayState(){
                 return;
                 break;
             };
+            break;
+        }
+        case DISPLAY_SETUP:{
+            if (updateDisplay){displayMenu();break;}
+            if (windowsize>=DISPLAY_REFRESH_RATE){displayMenu();timestamps.display+=DISPLAY_REFRESH_RATE;break;}
             break;
         }
     }
