@@ -54,8 +54,13 @@ void phone(bool charging, int x0, int w = 17){
     // display.clearPixel(x0,31);
     // display.clearPixel(x0+15,31);
     // battery(x0+4, 60, 20,w-8,false);
+    display.setFont();
+    display.setCursor(x0+3,8);
+    display.print("12");
+    display.setCursor(x0+3,17);
+    display.print("34");
     if (charging){
-        power(x0+w/2);
+        // power(x0+w/2);
     } 
     // else {
     // }
@@ -86,14 +91,14 @@ void camera(int xs, int n, bool connected, bool rec, int soc){
             display.drawLine(x0,y0,x0+23,y0+15,SSD1306_WHITE);
             display.drawLine(x0,y0+15,x0+23,y0,SSD1306_WHITE);
         } else{
-             int w = max(min(soc,100), 0) * 18 / 100;
-            display.fillRect(x0+1,y0+7,w,7,SSD1306_WHITE);if (rec){
-            display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14,SSD1306_WHITE);
-            if (blink) display.fillCircle(x0+5,y0+3,3,SSD1306_WHITE);
-            else display.fillCircle(x0+13,y0+3,3,SSD1306_WHITE);
-        }
+            int w = max(min(soc,100), 0) * 18 / 100;
+            display.fillRect(x0+1,y0+7,w,7,SSD1306_WHITE);
+            if (rec){
+                display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14,SSD1306_WHITE);
+                if (blink) display.fillCircle(x0+5,y0+3,3,SSD1306_WHITE);
+                else display.fillCircle(x0+13,y0+3,3,SSD1306_WHITE);
+            }
         } 
-
 }
 
 void GPS(int x0, bool powered){
@@ -112,8 +117,6 @@ void GPS(int x0, bool powered){
         // display.fillTriangle(x0,27,x0+4,16,x0,16);
     } else {
         int i_max = (timestamps.now%2000)/500;
-        display.setTextSize(1);
-        display.setTextColor(SSD1306_WHITE);
         display.setFont();
         for (int i=0;i<i_max;i++){
             display.setCursor(x0+3+4*i,15-5*i); display.println('z');
@@ -131,6 +134,8 @@ void GPS(int x0, bool powered){
 void setup(){
     display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
     timestamps.now = 0;
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
 }
 void loop(){
     timestamps.now = millis();
