@@ -70,6 +70,7 @@ bool updateDisplay = false;
 
 #define DISPLAY_REFRESH_RATE 40
 #define DISPLAY_BLINK_RATE 1000
+#define DISPLAY_TIME_OUT 60000
 
 bool anyKey = false;
 
@@ -409,13 +410,13 @@ void camera(int xs, int n, bool connected, bool rec, int soc){
             display.drawLine(x0,y0,x0+23,y0+15,SSD1306_WHITE);
             display.drawLine(x0,y0+15,x0+23,y0,SSD1306_WHITE);
         } else{
-             int w = max(min(soc,100), 0) * 18 / 100;
+            int w = max(min(soc,100), 0) * 18 / 100;
             display.fillRect(x0+1,y0+7,w,7,SSD1306_WHITE);
             if (rec){
                 display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14,SSD1306_WHITE);
                 if (blink) display.fillCircle(x0+5,y0+3,3,SSD1306_WHITE);
                 else display.fillCircle(x0+13,y0+3,3,SSD1306_WHITE);
-        }
+            }
         } 
 }
 
@@ -437,7 +438,7 @@ void GPS(int x0, bool powered){
         for (int i=0;i<i_max;i++){
             display.setCursor(x0+3+4*i,15-5*i);
             display.println('z');
-}
+        }
     }
 }
 
