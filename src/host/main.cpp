@@ -13,6 +13,26 @@
 #include <Fonts/FreeSans24pt7b.h>
 
 
+#include <WiFi.h>
+#include <time.h>
+
+
+struct tm timeinfo;
+
+
+#ifdef __has_include
+  #if __has_include("WiFi_SSID.h")
+    #include "WiFi_SSID.h"
+  #endif
+#endif
+#ifndef WIFI_SSID
+    #define WIFI_SSID ""
+#endif
+#ifndef WIFI_PWD
+    #define WIFI_PWD ""
+#endif
+
+
 uint16_t NextTryDelta = 10000;
 #define TIMEOUT_MS 5000
 
