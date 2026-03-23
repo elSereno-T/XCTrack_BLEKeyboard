@@ -5,20 +5,12 @@
 #include <shared.h>
 
 #include <Wire.h>
-#include <SSD1306Wire.h>
-
-
-// #ifdef __has_include
-//   #if __has_include("wifi.h")
-//     #include "wifi.h"
-//   #endif
-// #endif
-// #ifndef WIFI_SSID
-//     #define WIFI_SSID ""
-// #endif
-// #ifndef WIFI_PWD
-//     #define WIFI_PWD ""
-// #endif
+#include <Adafruit_GFX.h> 
+#include <Adafruit_SSD1306.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSans24pt7b.h>
 
 
 uint16_t NextTryDelta = 10000;
@@ -145,8 +137,10 @@ RTC_DATA_ATTR int bootCount = 0;
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 32 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
-SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 bool displayReady=false;
 
@@ -342,151 +336,148 @@ void ConnectAll(){
     }
 }
 
-void battery(int x0, int soc){
-    int h = max(min(soc,100), 0) * 28 / 100;
-    display.drawRect(x0, 3, 16, 29);
-    display.fillRect(x0+4,0,8,4);
-    display.fillRect(x0+1,31-h,14,h);
-    if ((soc < 20) && blink){
-        display.drawRect(x0+7, 20, 2,2);
-        display.drawRect(x0+7,8,2,10);
+void battery(int x0, int soc, int h=32, int w = 16, bool warn=true){
+    int y0 = (32-h)/2;
+    int h_cap = max(1, h/10);
+    int w_cap = (w*2)/3;
+    int x0_cap = (w-w_cap)/2 + x0;
+    int h_ext = h - h_cap;
+    int h_int = h_ext - 2;
+    int h_soc = (max(min(soc,100), 0) * h_int) / 100;
+    display.drawRect(x0, y0+h_cap, w, h_ext,SSD1306_WHITE);
+    display.fillRect(x0_cap,y0,w_cap,h_cap,SSD1306_WHITE);
+    display.fillRect(x0+1,y0+h-1-h_soc,w-2,h_soc,SSD1306_WHITE);
+    if ((soc < 20) && blink && warn){
+        display.drawRect(x0+7, 20, 2,2,SSD1306_WHITE);
+        display.drawRect(x0+7,8,2,10,SSD1306_WHITE);
     }
 
 }
-void phone(bool charging, int x0){
-    display.drawRect(x0,0,16,32);
-    display.clearPixel(x0,0);
-    display.clearPixel(x0+15,0);
-    display.clearPixel(x0,31);
-    display.clearPixel(x0+15,31);
-    if (charging){
 
-        display.fillTriangle(x0+8,5,x0+4,16,x0+8,16);
-        display.fillTriangle(x0+8,27,x0+12,16,x0+8,16);
-
+void power(int x0, int h = 20, int y0=16){
+        int w = h/5;
+        for (int sgn = -1; sgn<2; sgn+=2){
+            display.fillTriangle(x0-(sgn*0),y0+(sgn*h/2),x0+(sgn*w),y0,x0,y0-(sgn*h/10),SSD1306_WHITE);
+        }
+}
+void phone(bool charging, int x0, tm time, int w = 17){
+    int r = 3;
+    display.drawRoundRect(x0,0,w,32,r,SSD1306_WHITE);
+    display.drawLine(x0+4, 29, x0+w-4-1,29,SSD1306_WHITE);
+    display.fillCircle(x0+w/2,2,1,SSD1306_WHITE);
+    if (charging && blink){
+        power(x0+w/2); 
     }
-    // if (!charging){
-    //     int angle = (now/100) % 360;
-    //     float local_cos = cos(angle * PI / 180);
-    //     float local_sin = sin(angle * PI / 180);
-    //     display.fillTriangle(
-    //         int(local_cos*6)+x0+8,int(local_sin*6) + 15,
-    //         int(local_sin*4)+x0+8,int(local_cos*4) + 15,
-    //         -int(local_sin*4)+x0+8,-int(local_cos*4) + 15
-
-    //     );
-    // }
-
+    if (!charging || !blink){
+        display.setFont();
+        display.setCursor(x0+3,8);
+        display.printf("%02d",time.tm_hour);
+        display.setCursor(x0+3,17);
+        display.printf("%02d",time.tm_min);
+    }
 }
 
 void camera(int xs, int n, bool connected, bool rec, int soc){
     int x0 = 26*(n/ 2) + xs;
     int y0 = 16*(n%2);
 
-        display.drawRect(x0,y0+6,20,9);
-        display.drawCircle(x0+5,y0+3,3);
-        display.drawCircle(x0+13,y0+3,3);
-        display.drawTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14);
+        display.drawRect(x0,y0+6,20,9,SSD1306_WHITE);
+        display.drawCircle(x0+5,y0+3,3,SSD1306_WHITE);
+        display.drawCircle(x0+13,y0+3,3,SSD1306_WHITE);
+        display.drawTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14,SSD1306_WHITE);
         if (!connected){
-            display.drawLine(x0,y0,x0+23,y0+15);
-            display.drawLine(x0,y0+15,x0+23,y0);
+            display.drawLine(x0,y0,x0+23,y0+15,SSD1306_WHITE);
+            display.drawLine(x0,y0+15,x0+23,y0,SSD1306_WHITE);
         } else{
              int w = max(min(soc,100), 0) * 18 / 100;
-            display.fillRect(x0+1,y0+7,w,7);if (rec){
-            display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14);
-            if (blink) display.fillCircle(x0+5,y0+3,3);
-            else display.fillCircle(x0+13,y0+3,3);
+            display.fillRect(x0+1,y0+7,w,7,SSD1306_WHITE);
+            if (rec){
+                display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14,SSD1306_WHITE);
+                if (blink) display.fillCircle(x0+5,y0+3,3,SSD1306_WHITE);
+                else display.fillCircle(x0+13,y0+3,3,SSD1306_WHITE);
         }
         } 
-
 }
 
 void GPS(int x0, bool powered){
-    int r = 10;
-    display.fillRect(x0,r-1,2*r,32-2*r);
-    display.fillRect(x0,0,2,r);
-    x0 += r;
-    display.fillCircle(x0,r-1,r);
-    display.fillCircle(x0,32-r,r);
-    display.setColor(BLACK);
-    display.fillRect(x0-r+2,r-4,2*r-4,32-2*r+7);
-    display.setColor(WHITE);
+    int r = 7;
+    int w = 19;
+    display.fillRoundRect(x0,0,w,32,r,SSD1306_WHITE);
+    display.fillRect(x0+2,r-1,w-4,32-2*r-4 + 3,SSD1306_BLACK);
+    display.fillRect(x0+5,3,w-10,2,SSD1306_BLACK);
+    display.fillRect(x0+4,24,w-8,5,SSD1306_BLACK);
+    display.fillRect(x0,0,2,r,SSD1306_WHITE);
     if (powered){
-        // display.fillTriangle(x0,5,x0-4,16,x0,16);
-        // display.fillTriangle(x0,27,x0+4,16,x0,16);
+        power(x0+w/2,14,14);
     } else {
-        // display.drawLine(x0-r+2,r-4,x0+r-2,36-r);
-        // display.drawLine(x0-r+2,36-r,x0+r-2,r-4);
-        display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
-        display.drawString(x0,16,"z");
-        display.drawString(x0-4,20,"z");
-        display.drawString(x0+4,10,"Z");
+        int i_max = (timestamps.now%2000)/500;
+        display.setTextSize(1);
+        display.setTextColor(SSD1306_WHITE);
+        display.setFont();
+        for (int i=0;i<i_max;i++){
+            display.setCursor(x0+3+4*i,15-5*i);
+            display.println('z');
+}
     }
 }
 
+typedef enum {LEFT, CENTER, RIGHT, BOTH} ALIGN;
 
-void cleardisp(int startx, int starty, int lx, int ly)
-{
-  display.setColor(BLACK);
-  display.fillRect(startx, starty, lx, ly);
-  display.setColor(WHITE);
-}
-void cleardisp(void)
-{
-  cleardisp(0, 0, 128, 32);
-}
-typedef enum {LEFT, CENTER, RIGHT} ALIGN;
-
-void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_ALIGN_LEFT, int size = 10, bool clear_line = false)
+void displine(int y0, String text,  ALIGN align = LEFT, int size = 0
+    // , bool clear_line = false
+)
 {
 
   int start = 0;
   int cx1 = 0;
   switch (size)
   {
-  case 10:
-    display.setFont(ArialMT_Plain_10);
+  case 9:
+    display.setFont(&FreeSans9pt7b);
     break;
-  case 16:
-    display.setFont(ArialMT_Plain_16);
+  case 12:
+    display.setFont(&FreeSans12pt7b);
+    break;
+  case 18:
+    display.setFont(&FreeSans18pt7b);
     break;
   case 24:
-    display.setFont(ArialMT_Plain_24);
+    display.setFont(&FreeSans24pt7b);
     break;
   default:
-    display.setFont(ArialMT_Plain_10);
+    display.setFont();
     break;
   }
-  int strwidth = display.getStringWidth(text);
+  int16_t  x1, y1;
+    uint16_t strwidth, h;
+  display.getTextBounds(text, 0, 0, &x1, &y1, &strwidth, &h);
   switch (align)
   {
-  case TEXT_ALIGN_LEFT:
-    display.setTextAlignment(TEXT_ALIGN_LEFT);
-    cx1 = start;
+  case LEFT:
+    display.setCursor(x1,y0+h);
     break;
-  case TEXT_ALIGN_CENTER:
-    display.setTextAlignment(TEXT_ALIGN_CENTER);
-    start = 63;
-    cx1 = start - strwidth / 2;
+  case CENTER:
+    display.setCursor(x1+(SCREEN_WIDTH-1-strwidth)/2,y0+h);
     break;
-  case TEXT_ALIGN_RIGHT:
-    display.setTextAlignment(TEXT_ALIGN_RIGHT);
-    start = 127;
-    cx1 = start - strwidth;
+  case RIGHT:
+    display.setCursor(x1+SCREEN_WIDTH-1-strwidth,y0+h);
+    break;
+  case BOTH:
+    display.setCursor(x1+(SCREEN_WIDTH-1-strwidth)/2,h/2+SCREEN_HEIGHT/2);
     break;
   default:
     break;
   }
-  if (clear_line)
-  {
-    cleardisp(0, line * size, 127, size);
-  }
-  else
-  {
-    cleardisp(cx1, line * size, strwidth, size);
-  }
-  display.drawString(start, line * size, text);
-  display.setFont(ArialMT_Plain_10);
+//   if (clear_line)
+//   {
+//     cleardisp(0, line * size, 127, size);
+//   }
+//   else
+//   {
+//     cleardisp(cx1, line * size, strwidth, size);
+//   }
+  display.print(text);
+  display.setFont();
 }
 
 void changeState(String prevState, String nextState, unsigned long& ts, String ID){
@@ -504,8 +495,9 @@ void changeState(String prevState, String nextState, unsigned long& ts, String I
 
 void turnDisplayOff(){
     
-    display.displayOff();
-    displayReady = false;
+
+    display.clearDisplay();
+    display.ssd1306_command(SSD1306_DISPLAYOFF);
 }
 void endI2C(){
 
@@ -513,20 +505,28 @@ void endI2C(){
     pinMode(SDA, INPUT);               // avoid phantom current through I2C pins
     pinMode(SCL, INPUT);
 }
-void turnDisplayOn(){if (!displayReady) displayReady = display.init();}
+void turnDisplayOn(){
+    if (!displayReady) displayReady = display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
+    display.clearDisplay();
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    display.setFont();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextWrap(false);
+}
 
 void displayState(){
     if (displayReady) {
-        displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_CENTER, 16, true);
+        display.clearDisplay();
+        displine(0, ShortSystemStateString[sysState], BOTH, 12);
         // displine(2, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, 10, false);
         display.display();
     }
 }
 void displayCamera(){
     if (displayReady){
-        display.clear();
+        display.clearDisplay();
         battery(112, stateOfChargeMain);
-        phone(PhoneCharging==CHARGING, 90);
+        phone(PhoneCharging==CHARGING, 90, timeinfo);
         GPS(64,((timestamps.now+3000)%10000)<5000);
 
         for (int i=0;i<knownMacCount;i++){
@@ -545,7 +545,6 @@ void changeState(DisplayState nextState){
         turnDisplayOn();
     }
     if (((dispState == DISPLAY_OFF) || (dispState == DISPLAY_SYS_STATE)) && nextState==DISPLAY_CAMERA){timestamps.display_timeout=timestamps.now;}        
-    cleardisp();
 
     dispState = nextState;
 }
@@ -580,7 +579,7 @@ void updateDisplayState(){
         case DISPLAY_CAMERA:{
             if (updateDisplay){displayCamera();break;}
             if (windowsize>=DISPLAY_REFRESH_RATE){displayCamera();timestamps.display+=DISPLAY_REFRESH_RATE;break;}
-            if ((timestamps.now - timestamps.display_timeout) > 30000) {changeState(DISPLAY_OFF); return; break;}
+            if ((timestamps.now - timestamps.display_timeout) > DISPLAY_TIME_OUT) {changeState(DISPLAY_OFF); return; break;}
             break;
         }
         case DISPLAY_OFF:{
