@@ -28,7 +28,10 @@ struct {
     unsigned long now;
     unsigned long camera;
     unsigned long system;
+    unsigned long phone;
+    unsigned long gps;
     unsigned long display;
+    unsigned long display_timeout;
 } timestamps;
 
 typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, WAIT_FOR_SHUTDOWN_CONFIRMATION, SHUTDOWN, OFF} SystemState;
@@ -36,13 +39,26 @@ const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT
 const String ShortSystemStateString[] = {"HOLD", "HOLD","HOLD", "RELEASE", "CONFIRM", "SETUP", "RUNNING", "RELEASE", "CONFIRM", "SHUTDOWN", "OFF"};
 SystemState sysState = OFF;
 
-typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA} DisplayState;
-const String DisplayStateString[] = {"OFF", "SYS_STATE", "CAMERA"};
+typedef enum {DISCHARGING, CHARGING} PhoneState;
+const String PhoneStateString[] = {"DISCHARGING", "CHARGING"};
+PhoneState PhoneCharging = CHARGING;
+bool toggleCharging = false;
+bool ChargerInitialized = false;
+
+typedef enum {POWER_OFF, POWER_ON} GPSState;
+const String GPSStateStateString[] = {"POWER_OFF", "POWER_ON"};
+GPSState GPS_ON_OFF = POWER_OFF;
+
+
+typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA, DISPLAY_REFRESH} DisplayState;
+const String DisplayStateString[] = {"OFF", "SYS_STATE", "CAMERA", "REFRESH"};
 DisplayState dispState = DISPLAY_OFF;
 DisplayState prevDispState = DISPLAY_OFF;
 bool updateDisplay = false;
 
 bool anyKey = false;
+
+int stateOfChargeMain=75;
 
 
 #define Vol_p ((char) '+')
@@ -57,7 +73,7 @@ bool anyKey = false;
 #define BL ((char) 'l')
 
 #define XCT ((char) 'x')
-#define REC ((char) 'r')
+#define REC ((char) 'a')
 #define AltTab ((char) 's')
 
 const String key_chars =  String(ESC) + String(Backspace) + String(Power) + String(Enter) + String(Tab) ;
@@ -123,6 +139,8 @@ SSD1306Wire display(0x3c, SDA, SCL, GEOMETRY_128_32);
 
 bool displayReady=false;
 
+bool blink=false;
+
 
 const char* knownMacs[] = { "98:3d:ae:ab:e2:7a" , "98:3d:ae:ac:92:9a" };
 
@@ -140,6 +158,7 @@ struct BleClient {
     uint8_t                     battPercent = 255;   // 255 = unknown
     bool                        newbattvalue = false;
     bool                        connected   = false;
+    bool                        recording   = false;
     unsigned long               nextTry     = 0;
     unsigned long               commandSent = 0;         
 };
@@ -165,6 +184,7 @@ bool waitForAck(byte ACK_MSG) {
             Serial.printf("[HOST] ACK received from client %d.\n", i);
             clients[i].waitingForAck = false;
             any = true;
+            clients[i].recording = (ACK_MSG == ACK_STARTED);
         } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_MS)){
             Serial.printf("[HOST] ACK timeout for client %d.\n", i);
             clients[i].waitingForAck = false;
@@ -310,6 +330,90 @@ void ConnectAll(){
         }
     }
 }
+
+void battery(int x0, int soc){
+    int h = max(min(soc,100), 0) * 28 / 100;
+    display.drawRect(x0, 3, 16, 29);
+    display.fillRect(x0+4,0,8,4);
+    display.fillRect(x0+1,31-h,14,h);
+    if ((soc < 20) && blink){
+        display.drawRect(x0+7, 20, 2,2);
+        display.drawRect(x0+7,8,2,10);
+    }
+
+}
+void phone(bool charging, int x0){
+    display.drawRect(x0,0,16,32);
+    display.clearPixel(x0,0);
+    display.clearPixel(x0+15,0);
+    display.clearPixel(x0,31);
+    display.clearPixel(x0+15,31);
+    if (charging){
+
+        display.fillTriangle(x0+8,5,x0+4,16,x0+8,16);
+        display.fillTriangle(x0+8,27,x0+12,16,x0+8,16);
+
+    }
+    // if (!charging){
+    //     int angle = (now/100) % 360;
+    //     float local_cos = cos(angle * PI / 180);
+    //     float local_sin = sin(angle * PI / 180);
+    //     display.fillTriangle(
+    //         int(local_cos*6)+x0+8,int(local_sin*6) + 15,
+    //         int(local_sin*4)+x0+8,int(local_cos*4) + 15,
+    //         -int(local_sin*4)+x0+8,-int(local_cos*4) + 15
+
+    //     );
+    // }
+
+}
+
+void camera(int xs, int n, bool connected, bool rec, int soc){
+    int x0 = 26*(n/ 2) + xs;
+    int y0 = 16*(n%2);
+
+        display.drawRect(x0,y0+6,20,9);
+        display.drawCircle(x0+5,y0+3,3);
+        display.drawCircle(x0+13,y0+3,3);
+        display.drawTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14);
+        if (!connected){
+            display.drawLine(x0,y0,x0+23,y0+15);
+            display.drawLine(x0,y0+15,x0+23,y0);
+        } else{
+             int w = max(min(soc,100), 0) * 18 / 100;
+            display.fillRect(x0+1,y0+7,w,7);if (rec){
+            display.fillTriangle(x0+19,y0+10,x0+23,y0+6,x0+23,y0+14);
+            if (blink) display.fillCircle(x0+5,y0+3,3);
+            else display.fillCircle(x0+13,y0+3,3);
+        }
+        } 
+
+}
+
+void GPS(int x0, bool powered){
+    int r = 10;
+    display.fillRect(x0,r-1,2*r,32-2*r);
+    display.fillRect(x0,0,2,r);
+    x0 += r;
+    display.fillCircle(x0,r-1,r);
+    display.fillCircle(x0,32-r,r);
+    display.setColor(BLACK);
+    display.fillRect(x0-r+2,r-4,2*r-4,32-2*r+7);
+    display.setColor(WHITE);
+    if (powered){
+        // display.fillTriangle(x0,5,x0-4,16,x0,16);
+        // display.fillTriangle(x0,27,x0+4,16,x0,16);
+    } else {
+        // display.drawLine(x0-r+2,r-4,x0+r-2,36-r);
+        // display.drawLine(x0-r+2,36-r,x0+r-2,r-4);
+        display.setTextAlignment(TEXT_ALIGN_CENTER_BOTH);
+        display.drawString(x0,16,"z");
+        display.drawString(x0-4,20,"z");
+        display.drawString(x0+4,10,"Z");
+    }
+}
+
+
 void cleardisp(int startx, int starty, int lx, int ly)
 {
   display.setColor(BLACK);
@@ -371,6 +475,7 @@ void displine(int line, String text,  OLEDDISPLAY_TEXT_ALIGNMENT align = TEXT_AL
     cleardisp(cx1, line * size, strwidth, size);
   }
   display.drawString(start, line * size, text);
+  display.setFont(ArialMT_Plain_10);
 }
 
 void changeState(String prevState, String nextState, unsigned long& ts, String ID){
@@ -402,31 +507,21 @@ void turnDisplayOn(){if (!displayReady) displayReady = display.init();}
 void displayState(){
     if (displayReady) {
         displine(0, ShortSystemStateString[sysState], TEXT_ALIGN_CENTER, 16, true);
-        displine(2, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, 10, false);
+        // displine(2, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, 10, false);
         display.display();
     }
 }
 void displayCamera(){
-    Serial.printf("[HOST] displayCamera called, displayReady=%d\n", displayReady);
     if (displayReady){
         display.clear();
-        display.drawRect(112, 3, 16, 29);
-        display.fillRect(116,0,8,4);
-        display.fillRect(113,21,14,10);
+        battery(112, stateOfChargeMain);
+        phone(PhoneCharging==CHARGING, 90);
+        GPS(64,((timestamps.now+3000)%10000)<5000);
 
-        display.drawRect(0,7,20,10);
-        display.drawCircle(5,3,3);
-        display.drawCircle(13,3,3);
+        for (int i=0;i<knownMacCount;i++){
+            camera(0, i, clients[i].connected, clients[i].recording,clients[i].battPercent);
+        }
 
-        display.drawRect(80,0,16,32);
-        display.clearPixel(80,0);
-        display.clearPixel(96,0);
-        display.clearPixel(80,31);
-        display.clearPixel(95,31);
-        display.fillTriangle(88,5,84,16,88,16);
-        display.fillTriangle(88,27,92,16,88,16);
-
-        // displine(0,"CAMERA");
         display.display();
     }
 }
@@ -434,7 +529,8 @@ void changeState(DisplayState nextState){
     changeState(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
     if ((dispState == DISPLAY_OFF) && (nextState != DISPLAY_OFF)) {
         turnDisplayOn();
-    }        
+    }
+    if (((dispState == DISPLAY_OFF) || (dispState == DISPLAY_SYS_STATE)) && nextState==DISPLAY_CAMERA){timestamps.display_timeout=timestamps.now;}        
     cleardisp();
 
     dispState = nextState;
@@ -448,20 +544,29 @@ void changeState(CameraState nextState){
     changeState(CameraStateString[camState], CameraStateString[nextState],timestamps.camera, "CAMERA");
     camState = nextState;
 }
-
-
+void changeState(PhoneState nextState){
+    changeState(PhoneStateString[PhoneCharging], PhoneStateString[nextState],timestamps.phone, "PHONE");
+    PhoneCharging = nextState;
+}
 void updateDisplayState(){
     unsigned long windowsize = timestamps.now - timestamps.display;
+    blink = (timestamps.now%1000)<500;
     if (prevDispState!=dispState) {updateDisplay = true;}
     switch (dispState){
         case DISPLAY_SYS_STATE:{
             if (updateDisplay){displayState();break;}
-            if (windowsize > 3000) {changeState(DISPLAY_CAMERA); return; break;}
+            if (windowsize > 3000) {
+                changeState(DISPLAY_CAMERA); 
+                timestamps.display_timeout=timestamps.now;
+                return; 
+                break;
+            }
             break;
         }
         case DISPLAY_CAMERA:{
             if (updateDisplay){displayCamera();break;}
-            if (windowsize > 10000) {changeState(DISPLAY_OFF); return; break;}
+            if (windowsize>=50){displayCamera();timestamps.display+=50;break;}
+            if ((timestamps.now - timestamps.display_timeout) > 30000) {changeState(DISPLAY_OFF); return; break;}
             break;
         }
         case DISPLAY_OFF:{
@@ -474,6 +579,7 @@ void updateDisplayState(){
             };
             if (KeypadMain.anyPress){
                 // turnDisplayOn();
+                timestamps.display_timeout=timestamps.now;
                 changeState(DISPLAY_CAMERA);
                 return;
                 break;
@@ -486,10 +592,45 @@ void updateDisplayState(){
 
 }
 
+void togglePDBoard(){
+    switch (PhoneCharging){
+        case CHARGING:{
+            // one button press to initiate charging
+            break;
+        }
+        case DISCHARGING:{
+            // three button presses to turn off PD Board
+            break;
+        }
+    }
+}
+
+void updatePhoneState(){
+    unsigned long window = timestamps.now - timestamps.phone;
+    PhoneState nextPhoneState;
+    switch (PhoneCharging){
+        case DISCHARGING:{nextPhoneState = CHARGING; break;}
+        case CHARGING:{nextPhoneState = DISCHARGING; break;}
+        default:{nextPhoneState = DISCHARGING; break;}
+    }
+    if (toggleCharging){
+        if (window > (1000*10) || !ChargerInitialized){
+            ChargerInitialized = true;
+            changeState(nextPhoneState);
+        } else {
+            changeState(PhoneCharging);
+
+        }
+        togglePDBoard();
+    }
+    toggleCharging = false;
+}
+
 
 void XCTrack(){
     Serial.println("[HOST] XCTrack");
-    bleKeyboard.print("xctrack"); // TODO check if it still works
+    bleKeyboard.print("xctrack");
+    toggleCharging=true;
 }
 
 void ALT_TAB(){
@@ -510,6 +651,8 @@ void Toggle_Recording(){
         recording = true;
     }
 }
+
+void updateGPSState(){}
 
 void updateCameraState(){
     static NimBLEScan* pScan = nullptr;
@@ -614,6 +757,8 @@ void enterDeepSleep(bool wait=true) {
     Serial.println("[HOST] Ending BLEKeyboard");
     // Shut down Bluetooth cleanly first
     bleKeyboard.end();
+    changeState(DISCHARGING);
+    togglePDBoard();
     if (wait) delay(2000);
     turnDisplayOff();
     endI2C();
@@ -724,6 +869,7 @@ void updateSystemState(){
             keyboardAvailable = true;
             changeState(RUNNING);
             changeState(CAMERA_CONNECTING);
+            toggleCharging = true;
             KeypadPower.setKey(0);
             break;
         }
@@ -802,11 +948,10 @@ void setup() {
 
 void loop() {
     timestamps.now = millis();
+    updateGPSState();
     updateSystemState();
     updateCameraState();
-    // ConnectAll();
-    // sendKeys();
-    // shutdown();
+    updatePhoneState();
     updateDisplayState();
     delay(10);
 }  
