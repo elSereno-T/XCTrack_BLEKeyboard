@@ -44,6 +44,7 @@ struct {
     unsigned long gps;
     unsigned long display;
     unsigned long display_timeout;
+    unsigned long timeinfo;
 } timestamps;
 
 typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, WAIT_FOR_SHUTDOWN_CONFIRMATION, SHUTDOWN, OFF} SystemState;
@@ -178,6 +179,7 @@ struct BleClient {
     NimBLERemoteCharacteristic* pCmd        = nullptr;
     NimBLERemoteCharacteristic* pAck        = nullptr;
     NimBLERemoteCharacteristic* pBatt       = nullptr;
+    NimBLERemoteCharacteristic* pTime       = nullptr;
     uint8_t                     ackValue    = 0;
     bool                        ackReceived = false;
     bool                        waitingForAck = false;
@@ -190,8 +192,34 @@ struct BleClient {
 };
 
 static BleClient clients[knownMacCount];
+
+void sendTime(uint32_t unixTime, int i){
+    if (!clients[i].connected || !clients[i].pTime) return;
+    clients[i].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
+    Serial.printf("[HOST] Time sent to client %d: %lu\n", i, unixTime);
+}
+void sendTime(int i){
+    time_t now;
+    time(&now);
+    uint32_t unixTime = (uint32_t)now;
+    if (!clients[i].connected || !clients[i].pTime) return;
+    clients[i].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
+    Serial.printf("[HOST] Time sent to client %d: %lu\n", i, unixTime);
+}
+
+void sendTime() {
+    time_t now;
+    time(&now);
+    uint32_t unixTime = (uint32_t)now;
+
+    for (int i = 0; i < knownMacCount; i++) {
+        sendTime(unixTime, i);
+    }
+}
+
 void sendCmd(uint8_t cmd) {
     Serial.printf("[HOST] Sent CMD: 0x%02X\n", cmd);
+    if (cmd == CMD_STOP) sendTime();
     for (int i = 0; i < knownMacCount; i++) {
         if (!clients[i].connected) continue;
         clients[i].ackReceived = false;
@@ -199,6 +227,7 @@ void sendCmd(uint8_t cmd) {
         clients[i].commandSent = timestamps.now;
         clients[i].pCmd->writeValue(&cmd, 1, false);
     }
+    if (cmd == CMD_START) sendTime();
 }
 
 bool waitForAck(byte ACK_MSG) {
@@ -281,6 +310,15 @@ bool connectToClient(int idx) {
         Serial.printf("[HOST] Characteristics not found on %s\n", knownMacs[idx]);
         pC->disconnect();
         return false;
+    }
+
+    NimBLERemoteCharacteristic* pTime = pSvc->getCharacteristic(TIME_CHAR_UUID);
+    if (pTime) {
+        clients[idx].pTime = pTime;
+        Serial.printf("[HOST] Client %d time characteristic found.\n", idx);
+        sendTime(idx);
+    } else {
+        Serial.printf("[HOST] Client %d time characteristic NOT found.\n", idx);
     }
 
     clients[idx].pClient = pC;
@@ -1040,10 +1078,17 @@ void setup() {
     ++bootCount;
 }
 
+void update_timeinfo(){
+    if (sysState != RUNNING) return;
+    if (timestamps.now - timestamps.timeinfo < 1000) return;
+    getLocalTime(&timeinfo);
+    timestamps.timeinfo = timestamps.now;
+}
+
 
 void loop() {
     timestamps.now = millis();
-    getLocalTime(&timeinfo);
+    update_timeinfo();
     updateGPSState();
     updateSystemState();
     updateCameraState();
