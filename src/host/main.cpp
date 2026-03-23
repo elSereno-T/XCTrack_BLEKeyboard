@@ -810,6 +810,40 @@ void enterDeepSleep(bool wait=true) {
   Serial.println("[HOST] Going to sleep now");
   esp_deep_sleep_start();
 }
+
+void printLocalTime(){
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+  Serial.print("Day of week: ");
+  Serial.println(&timeinfo, "%A");
+  Serial.print("Month: ");
+  Serial.println(&timeinfo, "%B");
+  Serial.print("Day of Month: ");
+  Serial.println(&timeinfo, "%d");
+  Serial.print("Year: ");
+  Serial.println(&timeinfo, "%Y");
+  Serial.print("Hour: ");
+  Serial.println(&timeinfo, "%H");
+  Serial.print("Hour (12 hour format): ");
+  Serial.println(&timeinfo, "%I");
+  Serial.print("Minute: ");
+  Serial.println(&timeinfo, "%M");
+  Serial.print("Second: ");
+  Serial.println(&timeinfo, "%S");
+
+  Serial.println("Time variables");
+  char timeHour[3];
+  strftime(timeHour,3, "%H", &timeinfo);
+  Serial.println(timeHour);
+  char timeWeekDay[10];
+  strftime(timeWeekDay,10, "%A", &timeinfo);
+  Serial.println(timeWeekDay);
+  Serial.println();
+}
+
 void updateSystemState(){
     unsigned long windowsize = timestamps.now - timestamps.system;
     switch (sysState){
@@ -872,6 +906,28 @@ void updateSystemState(){
         }
         case SETUP:{
             Serial.println("[HOST] Boot number: " + String(bootCount));
+            if (WIFI_SSID != ""){
+                Serial.println("[HOST] Starting WIFi");
+                
+                const char* ntpServer = "pool.ntp.org";
+                const long  gmtOffset_sec = 0;
+                const int   daylightOffset_sec = 0*3600;
+                WiFi.begin(WIFI_SSID, WIFI_PWD);
+                while (WiFi.status() != WL_CONNECTED) {
+                    delay(500);
+                    Serial.print(".");
+                }
+                Serial.println("");
+                Serial.println("WiFi connected.");
+                  // Init and get the time
+                configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+                printLocalTime();
+
+                //disconnect WiFi as it's no longer needed
+                WiFi.disconnect(true);
+                WiFi.mode(WIFI_OFF);
+
+            }
             Serial.printf("[HOST] Free heap before BLE init: %d bytes\n", ESP.getFreeHeap());
             Serial.println("[HOST] Starting BLEKeyboard");
 
@@ -966,6 +1022,7 @@ void setup() {
 
 void loop() {
     timestamps.now = millis();
+    getLocalTime(&timeinfo);
     updateGPSState();
     updateSystemState();
     updateCameraState();
