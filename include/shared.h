@@ -27,6 +27,11 @@
 // Host sends time to Cleints
 #define TIME_CHAR_UUID      "fa410106-446e-45a4-b44a-e0b411d14bb1"
 
+// Nordic UART Service — compatible with Serial Bluetooth Terminal app
+#define NUS_SERVICE_UUID    "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX_CHAR_UUID    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"  // phone writes here
+#define NUS_TX_CHAR_UUID    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // host notifies here
+
 
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
