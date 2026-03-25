@@ -54,4 +54,6 @@ CameraState camState = CAMERA_OFF;
 
 const char* HostMAC = "98:3d:ae:ab:a4:d6";
 
+class BatteryFilter;
+
 #endif
