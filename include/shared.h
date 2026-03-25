@@ -24,6 +24,9 @@
 // Client sends a single byte notify here to ACK
 #define ACK_CHAR_UUID       "57a0e065-c8bf-4164-a0d0-48d4858bbbff"
 
+// Host sends time to Cleints
+#define TIME_CHAR_UUID      "fa410106-446e-45a4-b44a-e0b411d14bb1"
+
 
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
