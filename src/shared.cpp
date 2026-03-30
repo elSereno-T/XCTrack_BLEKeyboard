@@ -28,29 +28,39 @@ const uint8_t SEND(CMD cmd){
     switch (cmd){
         case CMD::START: return 0x01;
         case CMD::STOP:  return 0x02;
+        case CMD::REPORT:  return 0x03;
         default: return 0x00;
     }
 }; 
-const uint8_t CONF(CMD cmd){
-    switch (cmd){
-        case CMD::START: return 0x11;
-        case CMD::STOP:  return 0x12;
-        default: return 0x10;
+// const uint8_t CONF(CMD cmd){
+//     switch (cmd){
+//         case CMD::START: return 0x11;
+//         case CMD::STOP:  return 0x12;
+//         default: return 0x10;
+//     }
+// };  
+// const uint8_t ACK(CMD cmd){
+//     switch (cmd){
+//         case CMD::START: return 0x21;
+//         case CMD::STOP:  return 0x22;
+//         default: return 0x20;
+//     }
+// }; 
+const char* toString(CMD cmd){
+    switch (cmd)
+    {
+        case CMD::START: return "START";
+        case CMD::STOP: return "STOP";
+        case CMD::REPORT: return "REPORT";
+        default:          return "UNKNOWN";
     }
-};  
-const uint8_t ACK(CMD cmd){
-    switch (cmd){
-        case CMD::START: return 0x21;
-        case CMD::STOP:  return 0x22;
-        default: return 0x20;
-    }
-}; 
-
+}
 const char* toString(uint8_t msg){
     switch (msg)
     {
         case 0x01: return "CMD::START";
         case 0x02: return "CMD::STOP";
+        case 0x03: return "CMD::REPORT";
         case 0x11: return "CONF::START";
         case 0x12: return "CONF::STOP";
         case 0x21: return "ACK::START";
@@ -65,6 +75,7 @@ const char* toString(CameraState state) {
     switch (state) {
         case CameraState::OFF: return "OFF";
         case CameraState::DISCONNECTED: return "DISCONNECTED";
+        case CameraState::CONNECTED: return "CONNECTED";
         case CameraState::READY: return "READY";
         case CameraState::BOOTING: return "BOOTING";
         case CameraState::RECORDING: return "RECORDING";

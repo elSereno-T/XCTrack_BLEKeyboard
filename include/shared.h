@@ -32,18 +32,18 @@
 #define NUS_TX_CHAR_UUID    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // host notifies here
 
 
-#define CLIENT_WATCHDOG_MS 30000
+#define CLIENT_WATCHDOG_MS 60000
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
 enum class CMD : byte{
     START,
-    STOP
+    STOP,
+    REPORT
 };
 const uint8_t SEND(CMD cmd); 
-const uint8_t CONF(CMD cmd); 
-const uint8_t ACK(CMD cmd); 
 
 const char* toString(uint8_t msg);
+const char* toString(CMD cmd);
 
 #define AWAKE 0x99
 
@@ -59,16 +59,17 @@ const char* toString(uint8_t msg);
 #define Max_TX_Power_db 9
 
 
-enum class CameraState : byte {
-    OFF,
-    DISCONNECTED, 
-    READY, 
-    BOOTING, 
-    RECORDING, 
-    STOPPING, 
-    STOPPED,
-    WAIT_FOR_BOOT,
-    WAIT_FOR_STOP,
+enum class CameraState : uint8_t  {
+    OFF             = 0x00,
+    DISCONNECTED    = 0x01,
+    CONNECTED       = 0x02,
+    READY           = 0x03,
+    BOOTING         = 0x04,
+    RECORDING       = 0x05,
+    STOPPING        = 0x06,
+    STOPPED         = 0x07,
+    WAIT_FOR_BOOT   = 0x08,
+    WAIT_FOR_STOP   = 0x09,
 };
 const char* toString(CameraState state);
 

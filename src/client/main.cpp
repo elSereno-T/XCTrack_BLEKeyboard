@@ -24,7 +24,8 @@ struct {
 } timestamps;
 CameraState camState = CameraState::OFF;
 
-
+char macStr[18];
+char macLastTwo[6];
 
 
 void clientMsg(const char* fmt, ...) {
@@ -33,30 +34,47 @@ void clientMsg(const char* fmt, ...) {
     va_start(args, fmt);
     vsnprintf(msgbuf, sizeof(msgbuf), fmt, args);
     va_end(args);
-    Serial.printf("[CLIENT] [%s] %s\n", toString(camState), msgbuf);
+    Serial.printf("[CLIENT %s - %s] %s\n", macLastTwo, toString(camState), msgbuf);
 }
 
+void notifyState() {
+    if (!connected || !pAckChar) return;
+    uint8_t val = static_cast<uint8_t>(camState);
+    pAckChar->setValue(&val, 1);
+    pAckChar->notify();
+    timestamps.alive = timestamps.now;
+    clientMsg("State notified");
+}
+void getMacBeforeInit() {
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_BT);   // get the BLE MAC specifically
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(macLastTwo, sizeof(macLastTwo), "%02X%02X", mac[4], mac[5]);
+    clientMsg("MAC: %s", macStr);
+}
 void changeTo(CameraState nextState){
     if (camState == nextState) return;
     // Serial.printf("[CLIENT] Going from %s to %s\n", toString(camState), toString(nextState));
     clientMsg("Going to %s",  toString(nextState));
     timestamps.camera=timestamps.now;
     camState=nextState;
+    notifyState();
 }
-void send_msg(uint8_t msg){
-    if (!connected) return;
-    clientMsg("Sent 0x%02X: %s", msg, toString(msg));
-    pAckChar->setValue(&msg, 1);
-    pAckChar->notify();
-    timestamps.alive = timestamps.now;
-}
-void send_ACK(CMD cmd){send_msg(ACK(cmd));}
-void send_CONF(CMD cmd){send_msg(CONF(cmd));}
+// void send_msg(uint8_t msg){
+//     if (!connected) return;
+//     clientMsg("Sent 0x%02X: %s", msg, toString(msg));
+//     pAckChar->setValue(&msg, 1);
+//     pAckChar->notify();
+//     timestamps.alive = timestamps.now;
+// }
+// void send_ACK(CMD cmd){send_msg(ACK(cmd));}
+// void send_CONF(CMD cmd){send_msg(CONF(cmd));}
 void updateState(){
     switch (camState){
         case CameraState::OFF:{
             if (shouldRecord) {
-                send_CONF(CMD::START);
+                // send_CONF(CMD::START);
                 changeTo(CameraState::BOOTING);
                 break;
             }
@@ -64,19 +82,19 @@ void updateState(){
         }
         case CameraState::BOOTING:{
             if (!shouldRecord) {
-                send_CONF(CMD::STOP);
+                // send_CONF(CMD::STOP);
                 changeTo(CameraState::STOPPING);
                 break;
             }
             if ((timestamps.now - timestamps.camera)>2000){
-                send_ACK(CMD::START);
+                // send_ACK(CMD::START);
                 changeTo(CameraState::RECORDING);
             }
             break;
         }
         case CameraState::RECORDING:{
             if (!shouldRecord) {
-                send_CONF(CMD::STOP);
+                // send_CONF(CMD::STOP);
                 changeTo(CameraState::STOPPING);
                 break;
             }
@@ -85,12 +103,12 @@ void updateState(){
         }
         case CameraState::STOPPING:{
             if (shouldRecord) {
-                send_CONF(CMD::START);
+                // send_CONF(CMD::START);
                 changeTo(CameraState::BOOTING);
                 break;
             }
             if ((timestamps.now - timestamps.camera)>3000){ 
-                send_ACK(CMD::STOP);
+                // send_ACK(CMD::STOP);
                 changeTo(CameraState::STOPPED);
             }
 
@@ -98,7 +116,7 @@ void updateState(){
         }
         case CameraState::STOPPED:{
             if (shouldRecord) {
-                send_CONF(CMD::START);
+                // send_CONF(CMD::START);
                 changeTo(CameraState::BOOTING);
                 break;
             }
@@ -122,16 +140,16 @@ void startTask() {
     shouldRecord = true;
     
     clientMsg("Recording requested.");
-    if (camState == CameraState::BOOTING){
-            send_CONF(CMD::START);
-            return;
-        }
-    if (camState == CameraState::RECORDING){
-        // send_CONF(CMD::START);
-        // delay(1000);
-        send_ACK(CMD::START);
-        return;
-    }
+    // if (camState == CameraState::BOOTING){
+    //         // send_CONF(CMD::START);
+    //         return;
+    //     }
+    // if (camState == CameraState::RECORDING){
+    //     // send_CONF(CMD::START);
+    //     // delay(1000);
+    //     // send_ACK(CMD::START);
+    //     return;
+    // }
 
     // changeTo(CameraState::BOOTING);
 
@@ -142,16 +160,16 @@ void startTask() {
 void stopTask() {
     shouldRecord = false;
     clientMsg("Recording stop requested.");
-    if (camState == CameraState::STOPPING){
-            send_CONF(CMD::STOP);
-            return;
-        }
-    if (camState == CameraState::STOPPED){
-        // send_CONF(CMD::STOP);
-        // delay(1000);
-        send_ACK(CMD::STOP);
-        return;
-    }
+    // if (camState == CameraState::STOPPING){
+    //         send_CONF(CMD::STOP);
+    //         return;
+    //     }
+    // if (camState == CameraState::STOPPED){
+    //     // send_CONF(CMD::STOP);
+    //     // delay(1000);
+    //     send_ACK(CMD::STOP);
+    //     return;
+    // }
     // changeTo(CameraState::STOPPING);
     // TODO: your real cleanup here
 }
@@ -168,6 +186,8 @@ class CmdCallback : public NimBLECharacteristicCallbacks {
 
         } else if (cmd == SEND(CMD::STOP)) {
             stopTask();
+        } else if (cmd == SEND(CMD::REPORT)){
+            notifyState();
         }
     }
 };
@@ -204,6 +224,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* pSvr, NimBLEConnInfo& connInfo) override {
         connected = true;
         clientMsg("Host connected.");
+        notifyState();
     }
     void onDisconnect(NimBLEServer* pSvr, NimBLEConnInfo& connInfo, int reason) override {
         connected = false;
@@ -220,9 +241,10 @@ void setup() {
     timestamps.battery = timestamps.now;
     timestamps.camera = timestamps.now;
     clientMsg("Starting...");
+    getMacBeforeInit();
     changeTo(CameraState::OFF);
 
-    NimBLEDevice::init("");
+    NimBLEDevice::init(macLastTwo);
     NimBLEDevice::setPower(Max_TX_Power_db);   // max TX power
 
     pServer = NimBLEDevice::createServer();
@@ -262,9 +284,15 @@ void setup() {
     // Advertise
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     pAdv->addServiceUUID(SERVICE_UUID);
-    pAdv->enableScanResponse(false);
+    pAdv->enableScanResponse(true);   
+
+    NimBLEAdvertisementData scanResponse;
+    scanResponse.setName(macLastTwo);
+    pAdv->setScanResponseData(scanResponse);  // name in scan response
     pAdv->start();
+
     clientMsg("MAC type: %s", NimBLEDevice::getAddress().isPublic() ? "PUBLIC" : "RANDOM");
+
     clientMsg("MAC: %s", NimBLEDevice::getAddress().toString().c_str());
     clientMsg("Advertising, waiting for host...");
     delay(1000);
@@ -281,7 +309,10 @@ void sendBattUpdate(){
         battPctPrev = sysBatt.soc;
         pBattChar->setValue(&pct, 1);
         pBattChar->notify();
+        timestamps.alive = timestamps.now;
         // Serial.printf("[CLIENT] Battery level sent to host: %d%%", pct);
+        clientMsg("Battery level sent to host: %d%%", pct);
+        notifyState();
     }
 }
 
@@ -290,6 +321,6 @@ void loop() {
     sendBattUpdate();
     updateState();
     
-    if ((timestamps.now-timestamps.alive) > (CLIENT_WATCHDOG_MS/4)){send_msg(AWAKE);}
+    if ((timestamps.now-timestamps.alive) > (CLIENT_WATCHDOG_MS/4)){notifyState;}
     delay(10);
 }

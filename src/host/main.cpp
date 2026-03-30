@@ -58,7 +58,7 @@ SystemState sysState = SystemState::OFF;
 
 CameraState camState = CameraState::OFF;
 
-
+unsigned long nToggles = 0; // number of recording toggles
 
 Battery sysBatt;
 
@@ -189,7 +189,6 @@ struct BleClient {
     NimBLERemoteCharacteristic* pAck        = nullptr;
     NimBLERemoteCharacteristic* pBatt       = nullptr;
     NimBLERemoteCharacteristic* pTime       = nullptr;
-    uint8_t                     dataValue   = 0;
     CameraState                 State       = CameraState::DISCONNECTED;
 
     
@@ -202,6 +201,9 @@ struct BleClient {
     unsigned long               TimeUpdated = 0;  
     unsigned long               lastSeen = 0;      
     uint8_t                     connectionAttempts = 0;
+    String                      mac = "";
+    String                      macLastTwo = "";
+
 };
 
 static BleClient clients[knownMacCount];
@@ -212,11 +214,11 @@ void clientMsg(int idx, const char* fmt, ...) {
     va_start(args, fmt);
     vsnprintf(msgbuf, sizeof(msgbuf), fmt, args);
     va_end(args);
-    Serial.printf("[CLIENT %d - %s] %s\n", idx, toString(clients[idx].State), msgbuf);
+    Serial.printf("[CLIENT %s - %s] %s\n", clients[idx].macLastTwo, toString(clients[idx].State), msgbuf);
 }
 void sendTime(uint32_t unixTime, int idx){
     if (!clients[idx].connected || !clients[idx].pTime) return;
-    if ((timestamps.now - clients[idx].TimeUpdated) < 1000) return;
+    if ((timestamps.now - clients[idx].TimeUpdated) < 10000) return;
     clients[idx].TimeUpdated = timestamps.now;
     clients[idx].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
     clientMsg(idx, "Time %lu sent", unixTime);
@@ -240,8 +242,9 @@ void sendTime() {
 
 void sendCmd(CMD cmd, int idx){
     if (!clients[idx].connected) return;
-    if ((timestamps.now - clients[idx].commandSent) < 100) return;
+    if ((timestamps.now - clients[idx].commandSent) < 1000) return;
     if (cmd == CMD::STOP) sendTime(idx);
+    clientMsg(idx, "Sent CMD 0x%02X - %s", SEND(cmd), toString(cmd));
     clients[idx].commandSent = timestamps.now;
     byte cmd_send = SEND(cmd);
     clients[idx].pCmd->writeValue(&cmd_send, 1, false);
@@ -462,7 +465,7 @@ void displayRunning(){
         GPS(64,GPSstatus==GPS_ON);
 
         for (int idx=0;idx<knownMacCount;idx++){
-            camera(0, idx, clients[idx].connected, clients[idx].recording, clients[idx].battPercent);
+            camera(0, idx, clients[idx].connected, (clients[idx].State == CameraState::RECORDING), clients[idx].battPercent);
         }
         onAir(32,15,recording);
         display.display();
@@ -557,6 +560,7 @@ class ClientCallbacks : public NimBLEClientCallbacks {
         for (int idx = 0; idx < knownMacCount; idx++) {
             if (clients[idx].pClient == pClient) {
                 clientMsg(idx, "connected.");
+                changeTo(CameraState::CONNECTED, idx);
                 clients[idx].connectionAttempts = 0;
                 return;
             }
@@ -590,6 +594,13 @@ class ClientCallbacks : public NimBLEClientCallbacks {
 
 static ClientCallbacks clientCallbacks; 
 bool connectToClient(int idx) {
+
+    if (clients[idx].macLastTwo == ""){
+        clients[idx].mac = knownMacs[idx];
+        clients[idx].mac.toUpperCase();
+        clients[idx].macLastTwo = clients[idx].mac.substring(clients[idx].mac.length() - 5);
+        clients[idx].macLastTwo.replace(":","");
+    }
      
     clientMsg(idx, "Attempt %i directly connecting to %s...", clients[idx].connectionAttempts, knownMacs[idx]);
 
@@ -645,8 +656,12 @@ bool connectToClient(int idx) {
         [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
             if (!len) return;
             if (!clients[idx].connected) return;
-            clientMsg(idx, "received 0x%02X: %s", data[0], toString(data[0]));
-            clients[idx].dataValue = data[0];
+
+            CameraState newState = static_cast<CameraState>(data[0]);
+            clientMsg(idx, "received 0x%02X", data[0]);
+            if ((nToggles==0) && (newState == CameraState::RECORDING)) recording = true;
+            changeTo(newState, idx);
+            // clients[idx].dataValue = data[0];
             clients[idx].lastSeen = timestamps.now;
         }
     );
@@ -674,7 +689,7 @@ bool connectToClient(int idx) {
     }
     clients[idx].connected = true;
     clients[idx].lastSeen = timestamps.now;
-    changeTo(CameraState::STOPPED,idx);
+    changeTo(CameraState::CONNECTED,idx);
     sendTime(idx);
     clientMsg(idx, "fully connected.");
     return true;
@@ -762,6 +777,7 @@ void resetClientConnectionCounts(){
 }
 
 void Toggle_Recording(){
+    nToggles ++;
     resetClientConnectionCounts();
     if (recording) {
         Serial.println("[HOST] Stop Recording");
@@ -809,62 +825,34 @@ void clientState(int idx){
             callConnectToClient(idx);
             break;
         }
-        case CameraState::WAIT_FOR_BOOT:{
-            if (Watchdog(idx)) break;
-            if (clients[idx].dataValue == CONF(CMD::START)) {
-                changeTo(CameraState::BOOTING, idx);
-                break;
-            }
-            if (clients[idx].dataValue == ACK(CMD::START)) {
-                changeTo(CameraState::RECORDING, idx);
-                clients[idx].recording = true;
-                break;
-            }
-            sendCmd(CMD::START, idx);
-            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
+        case CameraState::CONNECTED:{
+            sendCmd(CMD::REPORT,idx);
+            break;
+        }
+        case CameraState::OFF:{
+            if (recording) sendCmd(CMD::START, idx);
             break;
         }
         case CameraState::BOOTING:{
-            if (Watchdog(idx)) break;
-            if (clients[idx].dataValue == ACK(CMD::START)) {
-                changeTo(CameraState::RECORDING, idx);
-                clients[idx].recording = true;
-                break;
-            }
-            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
+            if ((!recording) && (nToggles>0)) sendCmd(CMD::STOP, idx);
             break;
         }
         case CameraState::RECORDING:{
-            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
-            break;
-        }
-        case CameraState::WAIT_FOR_STOP:{
-            if (Watchdog(idx)) break;
-            if (clients[idx].dataValue == CONF(CMD::STOP)) {
-                changeTo(CameraState::STOPPING, idx);
-                break;
-            }
-            if (clients[idx].dataValue == ACK(CMD::STOP)) {
-                changeTo(CameraState::STOPPED, idx);
-                clients[idx].recording = false;
-                break;
-            }
-            sendCmd(CMD::STOP, idx);
-            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            if ((!recording) && (nToggles>0)) sendCmd(CMD::STOP, idx);
             break;
         }
         case CameraState::STOPPING:{
-            if (Watchdog(idx)) break;
-            if (clients[idx].dataValue == ACK(CMD::STOP)) {
-                changeTo(CameraState::STOPPED, idx);
-                clients[idx].recording = false;
-                break;
-            }
-            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            if (recording) sendCmd(CMD::START, idx);
             break;
         }
         case CameraState::STOPPED:{
-            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            if (recording) sendCmd(CMD::START, idx);
+            break;
+        }
+        default:{
+            
+            if (recording) sendCmd(CMD::START, idx);
+            else if (nToggles>0) sendCmd(CMD::STOP, idx);
             break;
         }
 
@@ -875,32 +863,6 @@ void updateCameraState(){
     for (int idx = 0; idx < knownMacCount; idx++) {
         clientState(idx);
     }
-    // switch (camState){
-    //     case CameraState::DISCONNECTED:{
-    //         changeTo(CameraState::READY);
-    //         break;}
-    //     case CameraState::READY:{
-    //         if (recording) changeTo(CameraState::RECORDING);
-    //         break;
-    //     }
-    //     case CameraState::RECORDING:{
-    //         waitForAck(CMD::START);
-    //         if (!recording) changeTo(CameraState::STOPPED);
-    //         break;
-    //     }
-    //     case CameraState::STOPPED:{
-    //         waitForAck(CMD::STOP);
-    //         if (recording)changeTo(CameraState::RECORDING);
-    //         break;
-    //     }
-    //     case CameraState::OFF:{
-    //         break;
-    //     }
-    //     default:{
-    //         changeTo(CameraState::READY);
-    //         break;
-    //     }
-    // }
 }
 
 void sendKey( char KEY){
