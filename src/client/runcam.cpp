@@ -1,24 +1,26 @@
 /**
- * RunCam Thumb Pro W — ESP32-C3 UART Controller (v4 - final)
- * ===========================================================
- * Verified behaviour for features=0x0077:
+ * RunCam Thumb Pro W — ESP32-C3 UART Controller (v5)
+ * ====================================================
+ * Command mapping verified against the Thumb Pro W manual and Betaflight source:
  *
- *   START_REC (bit6) SET,  STOP_REC (bit7) NOT SET
- *   → ACTION_START_REC (0x03) acts as a TOGGLE: start when idle, stop when recording
- *   → ACTION_POWER_BTN (0x01) is the TRUE power button — DO NOT use for recording
- *   → ACTION_CHANGE_MODE (0x02) cycles between video and QR/settings mode
+ *   CAMERA POWER (start/stop video) = ACTION_POWER_BTN  (0x01)  ← toggle
+ *   CAMERA CHANGE MODE              = ACTION_CHANGE_MODE (0x02)  ← cycles video↔QR
  *
- * LED states (Thumb Pro W):
- *   Solid red           = standby (ready to record)
- *   Slow red flash      = recording
- *   Green solid/flash   = QR/settings mode
- *   Off                 = powered down
+ * The START_REC (0x03) / STOP_REC (0x04) actions in the feature flags (0x0077)
+ * appear to be reported by the camera but are NOT the correct commands for the
+ * Thumb Pro W — Betaflight uses POWER_BTN for record start/stop on this model.
+ *
+ * LED states:
+ *   Solid red        = standby (powered, ready)
+ *   Slow red flash   = recording
+ *   Green solid      = QR/settings mode
+ *   Off              = powered down
  *
  * Wiring (XIAO ESP32-C3 ↔ RunCam 1.25mm 4P):
- *   RunCam TX  →  GPIO20 (UART1 RX)
- *   RunCam RX  →  GPIO21 (UART1 TX)
- *   RunCam GND →  GND
- *   RunCam 5V  →  5V supply (NOT 3.3V)
+ *   RunCam TX  → GPIO20 (UART1 RX)
+ *   RunCam RX  → GPIO21 (UART1 TX)
+ *   RunCam GND → GND
+ *   RunCam 5V  → 5V supply (NOT 3.3V)
  *
  * Baud: 115200, 8N1
  */
@@ -41,14 +43,14 @@ static const uint8_t CMD_GET_DEVICE_INFO = 0x00;
 static const uint8_t CMD_CAMERA_CONTROL  = 0x01;
 static const uint8_t CMD_WRITE_SETTING   = 0x13;
 
-// Action IDs for CMD_CAMERA_CONTROL
-static const uint8_t ACTION_WIFI_BTN     = 0x00;
-static const uint8_t ACTION_POWER_BTN    = 0x01;  // TRUE power on/off — do NOT use for recording
-static const uint8_t ACTION_CHANGE_MODE  = 0x02;  // cycles video ↔ QR/settings
-static const uint8_t ACTION_START_REC    = 0x03;  // toggles start/stop on Thumb Pro W
-static const uint8_t ACTION_STOP_REC     = 0x04;  // only use if FEAT_STOP_REC is set
+// Action IDs for CMD_CAMERA_CONTROL (0x01)
+static const uint8_t ACTION_WIFI_BTN     = 0x00;  // toggle WiFi
+static const uint8_t ACTION_POWER_BTN    = 0x01;  // CAMERA POWER: toggle start/stop recording
+static const uint8_t ACTION_CHANGE_MODE  = 0x02;  // CAMERA CHANGE MODE: cycle video ↔ QR
+static const uint8_t ACTION_START_REC    = 0x03;  // explicit start (not used for Thumb Pro W)
+static const uint8_t ACTION_STOP_REC     = 0x04;  // explicit stop  (not used for Thumb Pro W)
 
-// Feature flags (GET_DEVICE_INFO response byte 2+3, little-endian)
+// Feature flags
 static const uint16_t FEAT_POWER_BTN     = (1 << 0);
 static const uint16_t FEAT_WIFI_BTN      = (1 << 1);
 static const uint16_t FEAT_CHANGE_MODE   = (1 << 2);
@@ -58,14 +60,14 @@ static const uint16_t FEAT_DISPLAYPORT   = (1 << 5);
 static const uint16_t FEAT_START_REC     = (1 << 6);
 static const uint16_t FEAT_STOP_REC      = (1 << 7);
 
-// Setting IDs
 static const uint8_t SETTING_CAMERA_TIME = 6;  // STRING "YYYY-MM-DD HH:MM:SS"
 
 // ── Timing ────────────────────────────────────────────────────────────────────
-static const uint32_t BTN_PRESS_DELAY_MS  = 300;   // post-command settle time
-static const uint32_t MODE_CHANGE_DELAY   = 600;   // longer wait after CHANGE_MODE
-static const uint32_t RX_TIMEOUT_MS       = 500;
-static const uint32_t RX_INTER_BYTE_MS    = 50;
+// 300ms matches Betaflight's rcdevice debounce for the Thumb Pro / Hybrid type.
+static const uint32_t BTN_PRESS_DELAY_MS  = 300;
+static const uint32_t MODE_CHANGE_DELAY   = 600;
+static const uint32_t RX_TIMEOUT_MS       = 300;
+static const uint32_t RX_INTER_BYTE_MS    = 30;
 static const uint32_t INIT_RETRY_DELAY_MS = 1000;
 static const uint8_t  INIT_MAX_RETRIES    = 10;
 
@@ -90,7 +92,7 @@ bool    setCameraTime(const char *timeStr);
 bool    setCameraTimeFromTm(const struct tm *t);
 bool    initCamera();
 
-// ── CRC-8 poly 0xD5 (matches Betaflight's crc8HighFirst) ─────────────────────
+// ── CRC-8 poly 0xD5 ──────────────────────────────────────────────────────────
 uint8_t crc8(const uint8_t *data, size_t len) {
     uint8_t crc = 0x00;
     for (size_t i = 0; i < len; i++) {
@@ -102,7 +104,6 @@ uint8_t crc8(const uint8_t *data, size_t len) {
     return crc;
 }
 
-// ── Drain stale RX bytes before sending ──────────────────────────────────────
 void drainRx() {
     uint32_t deadline = millis() + 20;
     while (millis() < deadline) {
@@ -113,7 +114,6 @@ void drainRx() {
     }
 }
 
-// ── Build and transmit packet ─────────────────────────────────────────────────
 void sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen) {
     uint8_t buf[64];
     size_t totalLen = 2 + payloadLen;
@@ -124,15 +124,14 @@ void sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen) {
     buf[totalLen] = crc8(buf, totalLen);
 
     Serial.printf("[TX] cmd=0x%02X", cmd);
-    for (size_t i = 0; i < payloadLen; i++) Serial.printf(" 0x%02X", payload[i]);
-    Serial.printf("  crc=0x%02X\n", buf[totalLen]);
+    for (size_t i = 0; i < payloadLen; i++) Serial.printf(" arg=0x%02X", payload[i]);
+    Serial.printf(" crc=0x%02X\n", buf[totalLen]);
 
     drainRx();
     RUNCAM_SERIAL.write(buf, totalLen + 1);
     RUNCAM_SERIAL.flush();
 }
 
-// ── Read response ─────────────────────────────────────────────────────────────
 size_t receivePacket(uint8_t *buf, size_t maxLen) {
     size_t count = 0;
     uint32_t deadline = millis() + RX_TIMEOUT_MS;
@@ -147,18 +146,17 @@ size_t receivePacket(uint8_t *buf, size_t maxLen) {
         for (size_t i = 0; i < count; i++) Serial.printf(" 0x%02X", buf[i]);
         Serial.println();
     } else {
-        Serial.println("[RX] (no response)");
+        Serial.println("[RX] (none — normal for control commands)");
     }
     return count;
 }
 
 bool validateResponse(const uint8_t *buf, size_t len) {
-    if (len < 2) return false;
-    if (buf[0] != RC_HEADER) return false;
+    if (len < 2 || buf[0] != RC_HEADER) return false;
     return buf[len - 1] == crc8(buf, len - 1);
 }
 
-// ── GET_DEVICE_INFO (0x00) ────────────────────────────────────────────────────
+// ── GET_DEVICE_INFO ───────────────────────────────────────────────────────────
 bool getDeviceInfo() {
     Serial.println("[CMD] GET_DEVICE_INFO");
     sendPacket(CMD_GET_DEVICE_INFO, nullptr, 0);
@@ -182,62 +180,32 @@ bool getDeviceInfo() {
     return true;
 }
 
-// ── Camera control — fire and forget ─────────────────────────────────────────
+// ── Camera control ────────────────────────────────────────────────────────────
+// Control commands send no ACK — the postDelay gives the camera time to act.
 void sendCameraControl(uint8_t action, uint32_t postDelayMs = BTN_PRESS_DELAY_MS) {
     sendPacket(CMD_CAMERA_CONTROL, &action, 1);
     delay(postDelayMs);
     drainRx();
 }
 
-// ── Recording control ─────────────────────────────────────────────────────────
-/**
- * Recording command selection (based on features=0x0077):
- *
- *   START_REC set, STOP_REC not set:
- *     → Use ACTION_START_REC (0x03) as a toggle for BOTH start and stop.
- *       The camera treats it as: "start if idle, stop if recording."
- *
- *   START_REC AND STOP_REC both set:
- *     → Use ACTION_START_REC (0x03) to start, ACTION_STOP_REC (0x04) to stop.
- *
- *   Neither set:
- *     → Fallback to ACTION_WIFI_BTN (0x00) as toggle.
- *       (POWER_BTN is the real power button — never use it for recording.)
- */
+// ── Recording ─────────────────────────────────────────────────────────────────
+// ACTION_POWER_BTN (0x01) = "CAMERA POWER" in Betaflight = start/stop toggle.
+// This is what the Thumb Pro W manual maps to the SA switch.
 bool startRecording() {
     if (g_isRecording) { Serial.println("[WARN] Already recording"); return false; }
-    Serial.println("[CMD] Start recording");
-
-    if (g_cameraFeatures & FEAT_START_REC) {
-        // 0x03 toggles: starts when idle
-        sendCameraControl(ACTION_START_REC);
-    } else {
-        // Fallback: wifi button acts as shutter on some models
-        Serial.println("[WARN] START_REC not advertised, trying WIFI_BTN");
-        sendCameraControl(ACTION_WIFI_BTN);
-    }
-
+    Serial.println("[CMD] Start recording → ACTION_POWER_BTN");
+    sendCameraControl(ACTION_POWER_BTN);
     g_isRecording = true;
-    Serial.println("[INFO] Recording STARTED");
+    Serial.println("[INFO] Recording STARTED (LED should flash red slowly)");
     return true;
 }
 
 bool stopRecording() {
     if (!g_isRecording) { Serial.println("[WARN] Not recording"); return false; }
-    Serial.println("[CMD] Stop recording");
-
-    if (g_cameraFeatures & FEAT_STOP_REC) {
-        // Explicit stop supported
-        sendCameraControl(ACTION_STOP_REC);
-    } else if (g_cameraFeatures & FEAT_START_REC) {
-        // START_REC toggles: stops when recording
-        sendCameraControl(ACTION_START_REC);
-    } else {
-        sendCameraControl(ACTION_WIFI_BTN);
-    }
-
+    Serial.println("[CMD] Stop recording → ACTION_POWER_BTN");
+    sendCameraControl(ACTION_POWER_BTN);
     g_isRecording = false;
-    Serial.println("[INFO] Recording STOPPED");
+    Serial.println("[INFO] Recording STOPPED (LED should return to solid red)");
     return true;
 }
 
@@ -245,16 +213,9 @@ void toggleRecording() {
     if (g_isRecording) stopRecording(); else startRecording();
 }
 
-// ── WRITE_SETTING (0x13) — set camera clock ──────────────────────────────────
-/**
- * Sets the camera RTC. Format: "YYYY-MM-DD HH:MM:SS"
- * Only call after confirming FEAT_SETTINGS (bit4) is set.
- * Response: [0xCC | result(0=OK) | update_menu | crc8] = 4 bytes.
- */
+// ── WRITE_SETTING — set camera clock ─────────────────────────────────────────
+// Format: "YYYY-MM-DD HH:MM:SS"
 bool setCameraTime(const char *timeStr) {
-    if (!(g_cameraFeatures & FEAT_SETTINGS)) {
-        Serial.println("[WARN] SETTINGS not advertised — trying anyway");
-    }
     size_t strLen     = strlen(timeStr) + 1;
     size_t payloadLen = 1 + strLen;
     uint8_t payload[32];
@@ -272,7 +233,7 @@ bool setCameraTime(const char *timeStr) {
         return false;
     }
     if (resp[1] == 0) { Serial.println("[INFO] Time set OK"); return true; }
-    Serial.printf("[ERR] WRITE_SETTING failed, code=0x%02X\n", resp[1]);
+    Serial.printf("[ERR] WRITE_SETTING failed, result=0x%02X\n", resp[1]);
     return false;
 }
 
@@ -291,7 +252,7 @@ bool initCamera() {
         Serial.printf("[INFO] Attempt %u/%u\n", i, INIT_MAX_RETRIES);
         if (getDeviceInfo()) {
             g_cameraReady = true;
-            g_isRecording = false;  // camera boots in standby
+            g_isRecording = false;
             return true;
         }
         delay(INIT_RETRY_DELAY_MS);
@@ -304,16 +265,22 @@ bool initCamera() {
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n=== RunCam Thumb Pro W v4 ===");
+    Serial.println("\n=== RunCam Thumb Pro W v5 ===");
     RUNCAM_SERIAL.begin(RUNCAM_BAUD, SERIAL_8N1, RUNCAM_RX_PIN, RUNCAM_TX_PIN);
     Serial.println("[INFO] Waiting 3s for camera to boot...");
     delay(3000);
     initCamera();
 
-    // Optionally sync time on boot — replace with NTP/RTC values:
+    // Uncomment to sync time on boot (replace with NTP/RTC values):
     // setCameraTime("2025-03-19 14:30:00");
 
-    Serial.println("[INFO] Commands: s=start  x=stop  t=toggle  i=info  d=set-time  m=change-mode");
+    Serial.println("[INFO] Commands:");
+    Serial.println("  s = start recording");
+    Serial.println("  x = stop recording");
+    Serial.println("  t = toggle recording");
+    Serial.println("  i = get device info");
+    Serial.println("  d = set camera time");
+    Serial.println("  m = change mode (video <-> QR)");
 }
 
 void loop() {
