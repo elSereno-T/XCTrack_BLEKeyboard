@@ -3,7 +3,7 @@
 #include <shared.h>
 
 uint16_t NextTryDelta = 5000;
-#define TIMEOUT_MS 5000
+#define TIMEOUT_ACK_MS 5000
 
 static NimBLEClient*               pClient  = nullptr;
 static NimBLERemoteCharacteristic* pCmd     = nullptr;
@@ -56,7 +56,7 @@ bool waitForAck() {
             Serial.printf("[HOST] ACK received from client %d.\n", i);
             clients[i].waitingForAck = false;
             any = true;
-        } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_MS)){
+        } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_ACK_MS)){
             Serial.printf("[HOST] ACK timeout for client %d.\n", i);
             clients[i].waitingForAck = false;
 

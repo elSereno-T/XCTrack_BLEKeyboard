@@ -14,10 +14,15 @@
 
 
 #include <WiFi.h>
+#include <esp_sntp.h>
 #include <time.h>
 
 
 struct tm timeinfo;
+
+#define ntpServer "pool.ntp.org"
+#define gmtOffset_sec 0
+#define daylightOffset_sec  (0*3600)
 
 
 #ifdef __has_include
@@ -33,8 +38,9 @@ struct tm timeinfo;
 #endif
 
 
-uint16_t NextTryDelta = 10000;
-#define TIMEOUT_MS 5000
+#define CONNECTION_PAUSE 5000
+#define CONNECTION_LONG_PAUSE 60000
+#define TIMEOUT_ACK_MS 5000
 
 struct {
     unsigned long now;
@@ -47,20 +53,24 @@ struct {
     unsigned long timeinfo;
 } timestamps;
 
-typedef enum {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, RUNNING, INITIAL_SHUTDOWN, WAIT_FOR_SHUTDOWN_CONFIRMATION, SHUTDOWN, OFF} SystemState;
-const String SystemStateString[] = {"INITIAL BOOT", "WAIT FOR BUTTON HOLD","WAIT FOR TIME", "WAIT FOR BUTTON RELEASE", "WAIT FOR CONFIRMATION", "SETUP", "RUNNING", "INITIAL SHUTDOWN", "WAIT FOR SHUTDOWN CONFIRMATION", "SHUTDOWN", "OFF"};
-const String ShortSystemStateString[] = {"HOLD", "HOLD","HOLD", "RELEASE", "CONFIRM", "SETUP", "RUNNING", "RELEASE", "CONFIRM", "SHUTDOWN", "OFF"};
-SystemState sysState = OFF;
+
+SystemState sysState = SystemState::OFF;
+
+CameraState camState = CameraState::OFF;
+
+
+
+Battery sysBatt;
 
 typedef enum {DISCHARGING, CHARGING} PhoneState;
 const String PhoneStateString[] = {"DISCHARGING", "CHARGING"};
-PhoneState PhoneCharging = CHARGING;
+PhoneState PhoneStatus = CHARGING;
 bool toggleCharging = false;
 bool ChargerInitialized = false;
 
-typedef enum {POWER_OFF, POWER_ON} GPSState;
-const String GPSStateStateString[] = {"POWER_OFF", "POWER_ON"};
-GPSState GPS_ON_OFF = POWER_OFF;
+typedef enum {GPS_OFF, GPS_ON} GPSState;
+const String GPSStateStateString[] = {"GPS_OFF", "GPS_ON"};
+GPSState GPSstatus = GPS_OFF;
 
 
 typedef enum  {DISPLAY_OFF, DISPLAY_SYS_STATE, DISPLAY_CAMERA, DISPLAY_SETUP} DisplayState;
@@ -75,7 +85,6 @@ bool updateDisplay = false;
 
 bool anyKey = false;
 
-int stateOfChargeMain=75;
 
 
 #define Vol_p ((char) '+')
@@ -180,31 +189,43 @@ struct BleClient {
     NimBLERemoteCharacteristic* pAck        = nullptr;
     NimBLERemoteCharacteristic* pBatt       = nullptr;
     NimBLERemoteCharacteristic* pTime       = nullptr;
-    uint8_t                     ackValue    = 0;
-    bool                        ackReceived = false;
-    bool                        waitingForAck = false;
+    uint8_t                     dataValue   = 0;
+    CameraState                 State       = CameraState::DISCONNECTED;
+
+    
     uint8_t                     battPercent = 255;   // 255 = unknown
-    bool                        newbattvalue = false;
     bool                        connected   = false;
     bool                        recording   = false;
     unsigned long               nextTry     = 0;
     unsigned long               commandSent = 0;         
+    unsigned long               stateChange = 0; 
+    unsigned long               TimeUpdated = 0;  
+    unsigned long               lastSeen = 0;      
+    uint8_t                     connectionAttempts = 0;
 };
 
 static BleClient clients[knownMacCount];
 
-void sendTime(uint32_t unixTime, int i){
-    if (!clients[i].connected || !clients[i].pTime) return;
-    clients[i].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
-    Serial.printf("[HOST] Time sent to client %d: %lu\n", i, unixTime);
+void clientMsg(int idx, const char* fmt, ...) {
+    char msgbuf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msgbuf, sizeof(msgbuf), fmt, args);
+    va_end(args);
+    Serial.printf("[CLIENT %d - %s] %s\n", idx, toString(clients[idx].State), msgbuf);
 }
-void sendTime(int i){
+void sendTime(uint32_t unixTime, int idx){
+    if (!clients[idx].connected || !clients[idx].pTime) return;
+    if ((timestamps.now - clients[idx].TimeUpdated) < 1000) return;
+    clients[idx].TimeUpdated = timestamps.now;
+    clients[idx].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
+    clientMsg(idx, "Time %lu sent", unixTime);
+}
+void sendTime(int idx){
     time_t now;
     time(&now);
     uint32_t unixTime = (uint32_t)now;
-    if (!clients[i].connected || !clients[i].pTime) return;
-    clients[i].pTime->writeValue((uint8_t*)&unixTime, sizeof(unixTime), false);
-    Serial.printf("[HOST] Time sent to client %d: %lu\n", i, unixTime);
+    sendTime(unixTime, idx);
 }
 
 void sendTime() {
@@ -212,188 +233,32 @@ void sendTime() {
     time(&now);
     uint32_t unixTime = (uint32_t)now;
 
-    for (int i = 0; i < knownMacCount; i++) {
-        sendTime(unixTime, i);
+    for (int idx = 0; idx < knownMacCount; idx++) {
+        sendTime(unixTime, idx);
     }
 }
 
-void sendCmd(uint8_t cmd) {
-    Serial.printf("[HOST] Sent CMD: 0x%02X\n", cmd);
-    if (cmd == CMD_STOP) sendTime();
-    for (int i = 0; i < knownMacCount; i++) {
-        if (!clients[i].connected) continue;
-        clients[i].ackReceived = false;
-        clients[i].waitingForAck = true;
-        clients[i].commandSent = timestamps.now;
-        clients[i].pCmd->writeValue(&cmd, 1, false);
-    }
-    if (cmd == CMD_START) sendTime();
-}
-
-bool waitForAck(byte ACK_MSG) {
-    bool any = false;
-    bool all = true;
-    for (int i = 0; i < knownMacCount; i++) {
-        if (!clients[i].waitingForAck) continue;
-        if (clients[i].ackReceived && (clients[i].ackValue == ACK_MSG)){
-            Serial.printf("[HOST] ACK received from client %d.\n", i);
-            clients[i].waitingForAck = false;
-            any = true;
-            clients[i].recording = (ACK_MSG == ACK_STARTED);
-        } else if (((timestamps.now - clients[i].commandSent) > TIMEOUT_MS)){
-            Serial.printf("[HOST] ACK timeout for client %d.\n", i);
-            clients[i].waitingForAck = false;
-
-        } else all = false;
-    }
-    return (any || all);
-}
-
-// ── Client callbacks ──────────────────────────────────────────────────────────
-class ClientCallbacks : public NimBLEClientCallbacks {
-    void onConnect(NimBLEClient* pClient) override {
-        // find which index this client is
-        for (int i = 0; i < knownMacCount; i++) {
-            if (clients[i].pClient == pClient) {
-                Serial.printf("[HOST] Client %d connected.\n", i);
-                return;
-            }
-        }
-    }
-
-    void onDisconnect(NimBLEClient* pClient, int reason) override {
-        for (int i = 0; i < knownMacCount; i++) {
-            if (clients[i].pClient == pClient) {
-                Serial.printf("[HOST] Client %d disconnected! Reason: %d\n", i, reason);
-                // Clear characteristics — they're invalid after disconnect
-                clients[i].pCmd        = nullptr;
-                clients[i].pAck        = nullptr;
-                clients[i].pBatt       = nullptr;
-                clients[i].ackReceived = false;
-                clients[i].battPercent = 255;
-                clients[i].connected   = false;
-                clients[i].nextTry     = timestamps.now;
-                // Don't delete pClient here — do it when reconnecting
-                return;
-            }
-        }
-    }
-};
-
-static ClientCallbacks clientCallbacks; 
-bool connectToClient(int idx) {
-     
-    Serial.printf("[HOST] directly connecting to %s...\n", knownMacs[idx]);
-
-    NimBLEClient* pC = NimBLEDevice::createClient();
-        pC->setClientCallbacks(&clientCallbacks, false);  // false = don't delete on disconnect
-        pC->setConnectTimeout(2000);  // short timeout — don't wait long
-
-    if (!pC->connect(NimBLEAddress(knownMacs[idx], BLE_ADDR_PUBLIC))) {
-        Serial.printf("[HOST] Direct connect failed: %s\n", knownMacs[idx]);
-        NimBLEDevice::deleteClient(pC);
-        return false;
-    }
-    Serial.printf("[HOST] Connected to: %s\n", knownMacs[idx]);
-
-    // ── CMD / ACK service ─────────────────────────────────────────────────────
-    NimBLERemoteService* pSvc = pC->getService(SERVICE_UUID);
-    if (!pSvc) {
-        Serial.printf("[HOST] Service not found on %s\n", knownMacs[idx]);
-        pC->disconnect();
-        return false;
-    }
-
-    NimBLERemoteCharacteristic* pCmd = pSvc->getCharacteristic(CMD_CHAR_UUID);
-    NimBLERemoteCharacteristic* pAck = pSvc->getCharacteristic(ACK_CHAR_UUID);
-    if (!pCmd || !pAck) {
-        Serial.printf("[HOST] Characteristics not found on %s\n", knownMacs[idx]);
-        pC->disconnect();
-        return false;
-    }
-
-    NimBLERemoteCharacteristic* pTime = pSvc->getCharacteristic(TIME_CHAR_UUID);
-    if (pTime) {
-        clients[idx].pTime = pTime;
-        Serial.printf("[HOST] Client %d time characteristic found.\n", idx);
-        sendTime(idx);
-    } else {
-        Serial.printf("[HOST] Client %d time characteristic NOT found.\n", idx);
-    }
-
-    clients[idx].pClient = pC;
-    clients[idx].pCmd    = pCmd;
-    clients[idx].pAck    = pAck;
-
-    // Subscribe to ACK notifications
-    pAck->subscribe(true,
-        [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-            if (!len) return;
-            Serial.printf("[HOST] Client %d ACK: 0x%02X\n", idx, data[0]);
-            clients[idx].ackReceived = true;
-            clients[idx].ackValue = data[0];
-        }
-    );
-
-    // ── Battery service (optional) ────────────────────────────────────────────
-    NimBLERemoteService* pBattSvc = pC->getService(BATTERY_SERVICE_UUID);
-    if (pBattSvc) {
-        NimBLERemoteCharacteristic* pBatt =
-            pBattSvc->getCharacteristic(BATTERY_CHAR_UUID);
-        if (pBatt) {
-            clients[idx].pBatt       = pBatt;
-            clients[idx].battPercent = pBatt->readValue<uint8_t>();
-            Serial.printf("[HOST] Client %d battery: %d%%\n",
-                          idx, clients[idx].battPercent);
-
-            pBatt->subscribe(true,
-                [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-                    if (!len) return;
-                    clients[idx].battPercent = data[0];
-                    Serial.printf("[HOST] Client %d battery update: %d%%\n",
-                                  idx, clients[idx].battPercent);
-                }
-            );
-        }
-    }
-    clients[idx].connected = true;
-    Serial.printf("[HOST] Client %d fully connected.\n", idx);
-    return true;
+void sendCmd(CMD cmd, int idx){
+    if (!clients[idx].connected) return;
+    if ((timestamps.now - clients[idx].commandSent) < 100) return;
+    if (cmd == CMD::STOP) sendTime(idx);
+    clients[idx].commandSent = timestamps.now;
+    byte cmd_send = SEND(cmd);
+    clients[idx].pCmd->writeValue(&cmd_send, 1, false);
+    if (cmd == CMD::START) sendTime(idx);
 
 }
-void callConnectToClient(int idx){
-        if (timestamps.now<clients[idx].nextTry || clients[idx].connected) return;
-        clients[idx].connected = connectToClient(idx);
-        if (!clients[idx].connected) clients[idx].nextTry =timestamps.now +  NextTryDelta;
-}
-void ConnectAll(){
-    static unsigned long lastCheck = 0;
-    if (timestamps.now - lastCheck < 500) return;
-    static bool connecting = false;
-    if (connecting) return;
-    lastCheck = timestamps.now;
-    for (int i = 0; i < knownMacCount; i++) {
 
-        if (clients[i].pClient && !clients[i].pClient->isConnected()) {
-            Serial.printf("[HOST] Client %d lost, reconnecting...\n", i);
-            NimBLEDevice::deleteClient(clients[i].pClient);
-            clients[i].pClient = nullptr;
-            clients[i].connected = false;
-            clients[i].nextTry = timestamps.now-1;
-        }
-        
-        if (!clients[i].connected &&
-            timestamps.now >= clients[i].nextTry) {
-            connecting = true;
-            clients[i].connected = connectToClient(i);
-            connecting = false;
-            if (!clients[i].connected)
-                clients[i].nextTry = timestamps.now + NextTryDelta;
-            // Only one reconnect attempt per loop cycle
-            return;
-        }
+void sendCmd(CMD cmd) {
+    Serial.printf("[HOST] Sent CMD: 0x%02X\n", SEND(cmd));
+    // if (cmd == CMD_STOP) sendTime();
+    for (int idx = 0; idx < knownMacCount; idx++) {
+        sendCmd(cmd, idx);
     }
 }
+
+
+
 
 void battery(int x0, int soc, int h=32, int w = 16, bool warn=true){
     int y0 = (32-h)/2;
@@ -424,10 +289,10 @@ void phone(bool charging, int x0, tm time, int w = 17){
     display.drawRoundRect(x0,0,w,32,r,SSD1306_WHITE);
     display.drawLine(x0+4, 29, x0+w-4-1,29,SSD1306_WHITE);
     display.fillCircle(x0+w/2,2,1,SSD1306_WHITE);
-    if (charging && blink){
+    if (charging ){
         power(x0+w/2); 
     }
-    if (!charging || !blink){
+    if (!charging ){
         display.setFont();
         display.setCursor(x0+3,8);
         display.printf("%02d",time.tm_hour);
@@ -456,6 +321,14 @@ void camera(int xs, int n, bool connected, bool rec, int soc){
                 else display.fillCircle(x0+13,y0+3,3,SSD1306_WHITE);
             }
         } 
+}
+
+void onAir(int x, int y, bool rec, int r=4){
+    if (rec && blink){
+        display.fillCircle(x,y,r,SSD1306_WHITE);
+    } else {
+        display.drawCircle(x,y,r,SSD1306_WHITE);
+    }
 }
 
 void GPS(int x0, bool powered){
@@ -539,7 +412,8 @@ void displine(int y0, String text,  ALIGN align = LEFT, int size = 0
   display.setFont();
 }
 
-void changeState(String prevState, String nextState, unsigned long& ts, String ID){
+
+void changeTo(String prevState, String nextState, unsigned long& ts, String ID){
     ts = timestamps.now;
     updateDisplay=true;
     timestamps.display = timestamps.now;
@@ -576,30 +450,31 @@ void turnDisplayOn(){
 void displayState(){
     if (displayReady) {
         display.clearDisplay();
-        displine(0, ShortSystemStateString[sysState], BOTH, 12);
-        // displine(2, ShortCameraStateString[camState], TEXT_ALIGN_RIGHT, 10, false);
+        displine(0, dispString(sysState), BOTH, 12);
         display.display();
     }
 }
-void displayCamera(){
+void displayRunning(){
     if (displayReady){
         display.clearDisplay();
-        battery(112, stateOfChargeMain);
-        phone(PhoneCharging==CHARGING, 90, timeinfo);
-        GPS(64,((timestamps.now+3000)%10000)<5000);
+        battery(112, sysBatt.soc);
+        phone(PhoneStatus==CHARGING, 90, timeinfo);
+        GPS(64,GPSstatus==GPS_ON);
 
-        for (int i=0;i<knownMacCount;i++){
-            camera(0, i, clients[i].connected, clients[i].recording,clients[i].battPercent);
+        for (int idx=0;idx<knownMacCount;idx++){
+            camera(0, idx, clients[idx].connected, clients[idx].recording, clients[idx].battPercent);
         }
-
+        onAir(32,15,recording);
         display.display();
     }
 }
 void displayMenu(){
 
 }
-void changeState(DisplayState nextState){
-    changeState(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
+
+
+void changeTo(DisplayState nextState){
+    changeTo(DisplayStateString[dispState], DisplayStateString[nextState],timestamps.display, "DISPLAY");
     if ((dispState == DISPLAY_OFF) && (nextState != DISPLAY_OFF)) {
         turnDisplayOn();
     }
@@ -607,18 +482,23 @@ void changeState(DisplayState nextState){
 
     dispState = nextState;
 }
-void changeState(SystemState nextState){
-    changeState(SystemStateString[sysState], SystemStateString[nextState],timestamps.system, "SYSTEM");
+void changeTo(SystemState nextState){
+    changeTo(toString(sysState), toString(nextState),timestamps.system, "SYSTEM");
     sysState = nextState;
-    changeState(DISPLAY_SYS_STATE);
+    changeTo(DISPLAY_SYS_STATE);
 }
-void changeState(CameraState nextState){
-    changeState(CameraStateString[camState], CameraStateString[nextState],timestamps.camera, "CAMERA");
+void changeTo(CameraState nextState){
+    changeTo(toString(camState), toString(nextState),timestamps.camera, "CAMERA");
+    bleKeyboard.tap(KEY_R);
     camState = nextState;
 }
-void changeState(PhoneState nextState){
-    changeState(PhoneStateString[PhoneCharging], PhoneStateString[nextState],timestamps.phone, "PHONE");
-    PhoneCharging = nextState;
+void changeTo(CameraState nextState, int idx){
+    changeTo(toString(clients[idx].State), toString(nextState),clients[idx].stateChange, "CLIENT " + String(idx));
+    clients[idx].State = nextState;
+}
+void changeTo(PhoneState nextState){
+    changeTo(PhoneStateString[PhoneStatus], PhoneStateString[nextState],timestamps.phone, "PHONE");
+    PhoneStatus = nextState;
 }
 void updateDisplayState(){
     unsigned long windowsize = timestamps.now - timestamps.display;
@@ -626,9 +506,10 @@ void updateDisplayState(){
     if (prevDispState!=dispState) {updateDisplay = true;}
     switch (dispState){
         case DISPLAY_SYS_STATE:{
+            if (sysState==SystemState::RUNNING){changeTo(DISPLAY_CAMERA);break;}
             if (updateDisplay){displayState();break;}
             if (windowsize > 3000) {
-                changeState(DISPLAY_CAMERA); 
+                changeTo(DISPLAY_CAMERA); 
                 timestamps.display_timeout=timestamps.now;
                 return; 
                 break;
@@ -636,9 +517,9 @@ void updateDisplayState(){
             break;
         }
         case DISPLAY_CAMERA:{
-            if (updateDisplay){displayCamera();break;}
-            if (windowsize>=DISPLAY_REFRESH_RATE){displayCamera();timestamps.display+=DISPLAY_REFRESH_RATE;break;}
-            if ((timestamps.now - timestamps.display_timeout) > DISPLAY_TIME_OUT) {changeState(DISPLAY_OFF); return; break;}
+            if (updateDisplay){displayRunning();break;}
+            if (windowsize>=DISPLAY_REFRESH_RATE){displayRunning();timestamps.display+=DISPLAY_REFRESH_RATE;break;}
+            if ((timestamps.now - timestamps.display_timeout) > DISPLAY_TIME_OUT) {changeTo(DISPLAY_OFF); return; break;}
             break;
         }
         case DISPLAY_OFF:{
@@ -652,7 +533,7 @@ void updateDisplayState(){
             if (KeypadMain.anyPress){
                 // turnDisplayOn();
                 timestamps.display_timeout=timestamps.now;
-                changeState(DISPLAY_CAMERA);
+                changeTo(DISPLAY_CAMERA);
                 return;
                 break;
             };
@@ -669,8 +550,165 @@ void updateDisplayState(){
 
 }
 
+// ── Client callbacks ──────────────────────────────────────────────────────────
+class ClientCallbacks : public NimBLEClientCallbacks {
+    void onConnect(NimBLEClient* pClient) override {
+        // find which index this client is
+        for (int idx = 0; idx < knownMacCount; idx++) {
+            if (clients[idx].pClient == pClient) {
+                clientMsg(idx, "connected.");
+                clients[idx].connectionAttempts = 0;
+                return;
+            }
+        }
+    }
+
+    void onDisconnect(NimBLEClient* pClient, int reason) override {
+        for (int idx = 0; idx < knownMacCount; idx++) {
+            if (clients[idx].pClient == pClient) {
+                clientMsg(idx, "disconnected! Reason: %d", reason);
+                // Clear characteristics — they're invalid after disconnect
+                NimBLEDevice::deleteClient(pClient);
+                clients[idx].pClient     = nullptr;
+                clients[idx].pCmd        = nullptr;
+                clients[idx].pAck        = nullptr;
+                clients[idx].pBatt       = nullptr;
+                clients[idx].pTime       = nullptr;
+                clients[idx].battPercent = 255;
+                clients[idx].connected   = false;
+                clients[idx].nextTry     = timestamps.now;
+                clients[idx].connectionAttempts = 0;
+                clients[idx].TimeUpdated = 0;
+                clients[idx].lastSeen = 0;
+                
+                changeTo(CameraState::DISCONNECTED,idx);
+                return;
+            }
+        }
+    }
+};
+
+static ClientCallbacks clientCallbacks; 
+bool connectToClient(int idx) {
+     
+    clientMsg(idx, "Attempt %i directly connecting to %s...", clients[idx].connectionAttempts, knownMacs[idx]);
+
+    NimBLEClient* pC = NimBLEDevice::createClient();
+        pC->setClientCallbacks(&clientCallbacks, false);  // false = don't delete on disconnect
+        pC->setConnectTimeout(2000);  // short timeout — don't wait long
+
+    if (!pC->connect(NimBLEAddress(knownMacs[idx], BLE_ADDR_PUBLIC))) {
+        clientMsg(idx, "Direct connect failed: %s", knownMacs[idx]);
+        NimBLEDevice::deleteClient(pC);
+        clients[idx].connectionAttempts += 1;
+        
+        int NextTryDelta = CONNECTION_LONG_PAUSE;
+        if (clients[idx].connectionAttempts<3) NextTryDelta = CONNECTION_PAUSE;
+        clients[idx].nextTry =timestamps.now +  NextTryDelta;
+
+        return false;
+    }
+    clientMsg(idx, "Connected to: %s", knownMacs[idx]);
+
+    // ── CMD / ACK service ─────────────────────────────────────────────────────
+    NimBLERemoteService* pSvc = pC->getService(SERVICE_UUID);
+    if (!pSvc) {
+        clientMsg(idx, "Service not found.");
+        pC->disconnect();
+        NimBLEDevice::deleteClient(pC);
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* pCmd = pSvc->getCharacteristic(CMD_CHAR_UUID);
+    NimBLERemoteCharacteristic* pAck = pSvc->getCharacteristic(ACK_CHAR_UUID);
+    if (!pCmd || !pAck) {
+        clientMsg(idx, "Characteristics not found.");
+        pC->disconnect();
+        NimBLEDevice::deleteClient(pC);
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* pTime = pSvc->getCharacteristic(TIME_CHAR_UUID);
+    if (pTime) {
+        clients[idx].pTime = pTime;
+        clientMsg(idx, "time characteristic found.");
+    } else {
+        clientMsg(idx, "time characteristic NOT found.");
+    }
+
+    clients[idx].pClient = pC;
+    clients[idx].pCmd    = pCmd;
+    clients[idx].pAck    = pAck;
+
+    // Subscribe to ACK notifications
+    pAck->subscribe(true,
+        [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+            if (!len) return;
+            if (!clients[idx].connected) return;
+            clientMsg(idx, "received 0x%02X: %s", data[0], toString(data[0]));
+            clients[idx].dataValue = data[0];
+            clients[idx].lastSeen = timestamps.now;
+        }
+    );
+
+    // ── Battery service (optional) ────────────────────────────────────────────
+    NimBLERemoteService* pBattSvc = pC->getService(BATTERY_SERVICE_UUID);
+    if (pBattSvc) {
+        NimBLERemoteCharacteristic* pBatt =
+            pBattSvc->getCharacteristic(BATTERY_CHAR_UUID);
+        if (pBatt) {
+            clients[idx].pBatt       = pBatt;
+            clients[idx].battPercent = pBatt->readValue<uint8_t>();
+            clientMsg(idx, "battery: %d%%", clients[idx].battPercent);
+
+            pBatt->subscribe(true,
+                [idx](NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+                    if (!len) return;
+                    if (!clients[idx].connected) return;
+                    clients[idx].battPercent = data[0];
+                    clients[idx].lastSeen = timestamps.now;
+                    clientMsg(idx, "battery update: %d%%", clients[idx].battPercent);
+                }
+            );
+        }
+    }
+    clients[idx].connected = true;
+    clients[idx].lastSeen = timestamps.now;
+    changeTo(CameraState::STOPPED,idx);
+    sendTime(idx);
+    clientMsg(idx, "fully connected.");
+    return true;
+
+}
+void callConnectToClient(int idx){
+        if (timestamps.now<clients[idx].nextTry || clients[idx].connected) return;
+        clients[idx].connected = connectToClient(idx);
+        if (clients[idx].connected) return;
+}
+void ConnectAll(bool resetTries = false){
+    // if (timestamps.now - lastCheck < 500) return;
+    static bool connecting = false;
+    if (connecting) return;
+    for (int idx = 0; idx < knownMacCount; idx++) {
+        if (resetTries) {
+            clients[idx].connectionAttempts = 0;
+            clients[idx].nextTry = timestamps.now;
+        }
+
+        
+        if (!clients[idx].connected &&
+            timestamps.now >= clients[idx].nextTry) {
+            connecting = true;
+            clients[idx].connected = connectToClient(idx);
+            connecting = false;
+            // Only one reconnect attempt per loop cycle
+            return;
+        }
+    }
+}
+
 void togglePDBoard(){
-    switch (PhoneCharging){
+    switch (PhoneStatus){
         case CHARGING:{
             // one button press to initiate charging
             break;
@@ -685,7 +723,7 @@ void togglePDBoard(){
 void updatePhoneState(){
     unsigned long window = timestamps.now - timestamps.phone;
     PhoneState nextPhoneState;
-    switch (PhoneCharging){
+    switch (PhoneStatus){
         case DISCHARGING:{nextPhoneState = CHARGING; break;}
         case CHARGING:{nextPhoneState = DISCHARGING; break;}
         default:{nextPhoneState = DISCHARGING; break;}
@@ -693,9 +731,9 @@ void updatePhoneState(){
     if (toggleCharging){
         if (window > (1000*10) || !ChargerInitialized){
             ChargerInitialized = true;
-            changeState(nextPhoneState);
+            changeTo(nextPhoneState);
         } else {
-            changeState(PhoneCharging);
+            changeTo(PhoneStatus);
 
         }
         togglePDBoard();
@@ -716,76 +754,153 @@ void ALT_TAB(){
     bleKeyboard.press(KEY_TAB);
     bleKeyboard.releaseAll();
 }
+void resetClientConnectionCounts(){
+    for (int idx=0; idx<knownMacCount;idx++){
+        clients[idx].nextTry = timestamps.now;
+        clients[idx].connectionAttempts = 0;
+    }
+}
 
 void Toggle_Recording(){
+    resetClientConnectionCounts();
     if (recording) {
         Serial.println("[HOST] Stop Recording");
-        recording = false;
+        // recording = false;
     }
     else {
         
         Serial.println("[HOST] Start Recording");
-        recording = true;
+        // recording = true;
+    }
+    recording = !recording;
+}
+
+void updateGPSState(){
+    int t_discharge = 10*60*1000;
+    float V = (t_discharge - (timestamps.now % t_discharge)) * (4.2-2.7)/t_discharge + 2.7;
+    sysBatt.update(V);
+
+    if ((timestamps.now%30000)<15000){
+        GPSstatus = GPS_ON;
+    } else {
+        GPSstatus = GPS_OFF;
     }
 }
 
-void updateGPSState(){}
+bool Watchdog(int idx){
+    if(clients[idx].lastSeen>0 && ((timestamps.now - clients[idx].lastSeen)>CLIENT_WATCHDOG_MS)) {
+        if (clients[idx].pClient) {
+            clients[idx].lastSeen = 0;
+            clients[idx].pClient->disconnect();   // triggers onDisconnect which deletes it
+        }
+        
+        clientMsg(idx, "Watchdog disconnect");
+        return true;
 
-void updateCameraState(){
-    static NimBLEScan* pScan = nullptr;
-    switch (camState){
-        case CAMERA_DISCONNECTED:{
-            if ((timestamps.now - timestamps.camera)>2000) {
-
-                Serial.println("[HOST] Starting client scan...");
-                changeState(CAMERA_CONNECTING);
-            }
-            break;}
-        // case CAMERA_SCANNING:{
-        //             // Scan still running — check if it's done
-        //     if ((timestamps.now - timestamps.camera)>2000) 
-        //     {
-        //     if (pScan->isScanning()) break;
-
-        //     Serial.println("[HOST] Scan complete.");
-        //     changeState(CAMERA_CONNECTING);}
-        //     break;}
-        case CAMERA_CONNECTING:{
-            ConnectAll();
-            changeState(CAMERA_READY);
-            changeState(RUNNING);
-            break;}
-        case CAMERA_READY:{
-            waitForAck(ACK_STOPPED);
-            if (recording) {
-                sendCmd(CMD_START);
-                changeState(CAMERA_BOOTING);
-            }
-            break;}
-        case CAMERA_BOOTING:{
-            if (waitForAck(ACK_STARTED)) {
-                ConnectAll();
-                
-                bleKeyboard.tap(KEY_R);
-                changeState(CAMERA_RECORDING);
-            }
-            break;}
-        case CAMERA_RECORDING:{
-            waitForAck(ACK_STARTED);
-            if (!recording) {
-                sendCmd(CMD_STOP);
-                changeState(CAMERA_SHUTDOWN);
-            }
-            break;}
-        case CAMERA_SHUTDOWN:{
-            if (waitForAck(ACK_STOPPED)) {
-                bleKeyboard.tap(KEY_R);
-                changeState(CAMERA_READY);
-            }
-            break;}
-        default:
-            break;
     }
+
+    return false;
+}
+
+void clientState(int idx){
+    Watchdog(idx);
+    switch (clients[idx].State) {
+        case CameraState::DISCONNECTED:{
+            callConnectToClient(idx);
+            break;
+        }
+        case CameraState::WAIT_FOR_BOOT:{
+            if (Watchdog(idx)) break;
+            if (clients[idx].dataValue == CONF(CMD::START)) {
+                changeTo(CameraState::BOOTING, idx);
+                break;
+            }
+            if (clients[idx].dataValue == ACK(CMD::START)) {
+                changeTo(CameraState::RECORDING, idx);
+                clients[idx].recording = true;
+                break;
+            }
+            sendCmd(CMD::START, idx);
+            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
+            break;
+        }
+        case CameraState::BOOTING:{
+            if (Watchdog(idx)) break;
+            if (clients[idx].dataValue == ACK(CMD::START)) {
+                changeTo(CameraState::RECORDING, idx);
+                clients[idx].recording = true;
+                break;
+            }
+            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
+            break;
+        }
+        case CameraState::RECORDING:{
+            if (!recording) changeTo(CameraState::WAIT_FOR_STOP, idx);
+            break;
+        }
+        case CameraState::WAIT_FOR_STOP:{
+            if (Watchdog(idx)) break;
+            if (clients[idx].dataValue == CONF(CMD::STOP)) {
+                changeTo(CameraState::STOPPING, idx);
+                break;
+            }
+            if (clients[idx].dataValue == ACK(CMD::STOP)) {
+                changeTo(CameraState::STOPPED, idx);
+                clients[idx].recording = false;
+                break;
+            }
+            sendCmd(CMD::STOP, idx);
+            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            break;
+        }
+        case CameraState::STOPPING:{
+            if (Watchdog(idx)) break;
+            if (clients[idx].dataValue == ACK(CMD::STOP)) {
+                changeTo(CameraState::STOPPED, idx);
+                clients[idx].recording = false;
+                break;
+            }
+            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            break;
+        }
+        case CameraState::STOPPED:{
+            if (recording) changeTo(CameraState::WAIT_FOR_BOOT, idx);
+            break;
+        }
+
+    }
+}
+void updateCameraState(){
+    // ConnectAll();
+    for (int idx = 0; idx < knownMacCount; idx++) {
+        clientState(idx);
+    }
+    // switch (camState){
+    //     case CameraState::DISCONNECTED:{
+    //         changeTo(CameraState::READY);
+    //         break;}
+    //     case CameraState::READY:{
+    //         if (recording) changeTo(CameraState::RECORDING);
+    //         break;
+    //     }
+    //     case CameraState::RECORDING:{
+    //         waitForAck(CMD::START);
+    //         if (!recording) changeTo(CameraState::STOPPED);
+    //         break;
+    //     }
+    //     case CameraState::STOPPED:{
+    //         waitForAck(CMD::STOP);
+    //         if (recording)changeTo(CameraState::RECORDING);
+    //         break;
+    //     }
+    //     case CameraState::OFF:{
+    //         break;
+    //     }
+    //     default:{
+    //         changeTo(CameraState::READY);
+    //         break;
+    //     }
+    // }
 }
 
 void sendKey( char KEY){
@@ -804,11 +919,11 @@ void sendKeys(){
     if (!keyboardAvailable) return;
     char* keys = KeypadMain.getKeys();
     anyKey = false;
-    for (byte i = 0; i<(ROWS*COLS); i++){
-        if (keys[i] == 0) continue;
+    for (byte idx = 0; idx<(ROWS*COLS); idx++){
+        if (keys[idx] == 0) continue;
         anyKey = true;
-        sendKey(keys[i]);
-        keys[i] = char(0);
+        sendKey(keys[idx]);
+        keys[idx] = char(0);
     }
 }
 
@@ -834,7 +949,7 @@ void enterDeepSleep(bool wait=true) {
     Serial.println("[HOST] Ending BLEKeyboard");
     // Shut down Bluetooth cleanly first
     bleKeyboard.end();
-    changeState(DISCHARGING);
+    changeTo(DISCHARGING);
     togglePDBoard();
     if (wait) delay(2000);
     turnDisplayOff();
@@ -906,87 +1021,114 @@ void printLocalTime(){
 void updateSystemState(){
     unsigned long windowsize = timestamps.now - timestamps.system;
     switch (sysState){
-        case OFF:{
+        case SystemState::OFF:{
             setupKeypad(POWER);
             // turnDisplayOn();
             KeypadPower.readKey(0);
-            changeState(INITIAL_BOOT);
-            changeState(CAMERA_OFF);
+            if (bootCount==1) changeTo(SystemState::SETUP);
+            else              changeTo(SystemState::INITIAL_BOOT);
+            changeTo(CameraState::OFF);
             break;
         }
 
-        case INITIAL_BOOT:{
+        case SystemState::INITIAL_BOOT:{
             timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
-            if (windowsize > (POWER_CYCLE_DELAY/2)) changeState(WAIT_FOR_BUTTON_HOLD);
+            if (windowsize > (POWER_CYCLE_DELAY/2)) changeTo(SystemState::WAIT_FOR_BUTTON_HOLD);
             break;
         }
-        case WAIT_FOR_BUTTON_HOLD:{
+        case SystemState::WAIT_FOR_BUTTON_HOLD:{
             timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
             if (KeypadPower.buttonState) {
-                changeState(WAIT_FOR_BUTTON_RELEASE);
+                changeTo(SystemState::WAIT_FOR_BUTTON_RELEASE);
                 timestamps.system -= POWER_CYCLE_DELAY/2;
                 Serial.println("[HOST] Waiting for Release of Power Button");
                 break;
             }
             if (windowsize>=POWER_CYCLE_DELAY) {
-                changeState(SHUTDOWN);
+                changeTo(SystemState::SHUTDOWN);
                 Serial.println("[HOST] Power Button Push not detected");
                 break;
             }
             break;
         }
-        case WAIT_FOR_BUTTON_RELEASE:{
+        case SystemState::WAIT_FOR_BUTTON_RELEASE:{
             timestamps.display = timestamps.now;
             KeypadPower.readKey(0);
             if (KeypadPower.keyState==RELEASED){
-                changeState(WAIT_FOR_CONFIRMATION);
+                changeTo(SystemState::WAIT_FOR_CONFIRMATION);
                 Serial.println("[HOST] First key released — waiting for second key");
                 break;
-                KeypadPower.readKey(1);
             }
             break;  
         }
-        case WAIT_FOR_CONFIRMATION:{
+        case SystemState::WAIT_FOR_CONFIRMATION:{
             timestamps.display = timestamps.now;
             KeypadPower.readKey(1);
             if (windowsize > POWER_CYCLE_DELAY) {
-                changeState(SHUTDOWN);
+                changeTo(SystemState::SHUTDOWN);
                 Serial.println("[HOST] Second key pressed too late — going back to sleep");
                 break;
             }
             if (KeypadPower.stateChanged){
-                changeState(SETUP);
+                changeTo(SystemState::SETUP);
                 Serial.println("[HOST] Startup Confirmed");
                 break;
             }
             break;
         }
-        case SETUP:{
+        case SystemState::SETUP:{
             Serial.println("[HOST] Boot number: " + String(bootCount));
+            delay(1000);
+            changeTo(SystemState::WIFI_CONNECTING);
+            break;
+        }
+        case SystemState::WIFI_CONNECTING:{
             if (WIFI_SSID != ""){
-                Serial.println("[HOST] Starting WIFi");
+                Serial.print("[HOST] Starting WiFi ");
                 
-                const char* ntpServer = "pool.ntp.org";
-                const long  gmtOffset_sec = 0;
-                const int   daylightOffset_sec = 0*3600;
                 WiFi.begin(WIFI_SSID, WIFI_PWD);
+
                 while (WiFi.status() != WL_CONNECTED) {
                     delay(500);
-                    Serial.print(".");
+                    Serial.print(". ");
                 }
                 Serial.println("");
-                Serial.println("WiFi connected.");
+                Serial.println("[HOST] WiFi connected.");
                   // Init and get the time
-                configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-                printLocalTime();
-
-                //disconnect WiFi as it's no longer needed
-                WiFi.disconnect(true);
-                WiFi.mode(WIFI_OFF);
-
+                changeTo(SystemState::NTP_CONNECTION);
+                break;
+            } else {
+                changeTo(SystemState::BLUETOOTH_CONNECTING);
+                break;
             }
+            break;
+        }
+        case SystemState::NTP_CONNECTION:{
+                  
+            Serial.print("[HOST] Waiting for NTP ");
+            sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED); 
+            configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+
+            int retries = 0;
+            while (!getLocalTime(&timeinfo) && retries < 20) {
+                delay(500);
+                retries++;
+                Serial.print(". ");
+            }
+            Serial.print("\n");
+            Serial.println("[HOST] NTP Synced");
+            time_t now;
+            time(&now);
+            Serial.printf("[HOST] Unix Time Stamp %d\n",now);
+
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            changeTo(SystemState::BLUETOOTH_CONNECTING);
+            break;
+        }
+        case SystemState::BLUETOOTH_CONNECTING:{            
             Serial.printf("[HOST] Free heap before BLE init: %d bytes\n", ESP.getFreeHeap());
             Serial.println("[HOST] Starting BLEKeyboard");
 
@@ -1000,29 +1142,29 @@ void updateSystemState(){
             setupKeypad(MAIN);
             delay(1000);
             keyboardAvailable = true;
-            changeState(RUNNING);
-            changeState(CAMERA_CONNECTING);
+            changeTo(CameraState::DISCONNECTED);
             toggleCharging = true;
-            KeypadPower.setKey(0);
+            KeypadPower.setKey(0);            
+            changeTo(SystemState::RUNNING);
             break;
         }
-        case RUNNING:{
+        case SystemState::RUNNING:{
             sendKeys();
             KeypadPower.readKey(0);
-            if (KeypadPower.veryLongPress(POWER_CYCLE_DELAY)){
-                changeState(INITIAL_SHUTDOWN);
+            if (KeypadPower.veryLongPress(POWER_CYCLE_DELAY) && (GPSstatus == GPS_OFF)){
+                changeTo(SystemState::INITIAL_SHUTDOWN);
                 Serial.println("[HOST] Waiting for Release of Power Button");
             }
             break;
 
         }
-        case INITIAL_SHUTDOWN:{
+        case SystemState::INITIAL_SHUTDOWN:{
             KeypadPower.readKey(0);
             timestamps.display = timestamps.now;
             if (KeypadPower.keyState == RELEASED){
-                changeState(WAIT_FOR_SHUTDOWN_CONFIRMATION);
+                changeTo(SystemState::WAIT_FOR_SHUTDOWN_CONFIRMATION);
                 Serial.println("[HOST] Waiting for Confirmation Button");
-                for (int i = 0; i<10; i++){
+                for (int idx = 0; idx<10; idx++){
                     sendKeys();
                     KeypadPower.readKey(1);
                     delay(10);
@@ -1030,31 +1172,31 @@ void updateSystemState(){
             }
             break;
         }
-        case WAIT_FOR_SHUTDOWN_CONFIRMATION:{
+        case SystemState::WAIT_FOR_SHUTDOWN_CONFIRMATION:{
             sendKeys();
             KeypadPower.readKey(1);
             timestamps.display = timestamps.now;
             if (windowsize<200) break;
             if ((windowsize) > POWER_CYCLE_DELAY){
-                changeState(RUNNING);
+                changeTo(SystemState::RUNNING);
                 KeypadPower.setKey(0);
                 Serial.println("[HOST] Confirmation didn't happen in time");
                 break;
             } 
             if (!KeypadPower.buttonState && KeypadPower.stateChanged){
-                changeState(SHUTDOWN);
+                changeTo(SystemState::SHUTDOWN);
                 Serial.println("[HOST] Shutdown confirmed");
                 break;
             };
             if (anyKey){
-                changeState(RUNNING);
+                changeTo(SystemState::RUNNING);
                 KeypadPower.setKey(0);
                 Serial.println("[HOST] Shutdown canceled by any key");
                 break;
             }
             break;
         }
-        case SHUTDOWN:{
+        case SystemState::SHUTDOWN:{
             enterDeepSleep();
             break;
         }
@@ -1079,7 +1221,7 @@ void setup() {
 }
 
 void update_timeinfo(){
-    if (sysState != RUNNING) return;
+    if (sysState != SystemState::RUNNING) return;
     if (timestamps.now - timestamps.timeinfo < 1000) return;
     getLocalTime(&timeinfo);
     timestamps.timeinfo = timestamps.now;
@@ -1094,5 +1236,6 @@ void loop() {
     updateCameraState();
     updatePhoneState();
     updateDisplayState();
-    delay(10);
+    unsigned long elapsed = millis()-timestamps.now;
+    if (elapsed<10) delay(10 - elapsed);
 }  

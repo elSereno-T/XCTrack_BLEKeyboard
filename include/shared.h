@@ -1,8 +1,8 @@
 
-#ifndef SHARED_H
-#define SHARED_H
+#pragma once
 
-#include <Arduino.h>
+
+// #include <Arduino.h>
 
 
 // ── Host GATT services (host acts as peripheral for these) ────────────────────
@@ -10,7 +10,6 @@
 #define HOST_NMEA_CHAR_UUID         "dc1ccec6-30a8-4ebc-9210-c7531e7cb4e1"
 
 
-#pragma once
 // Standard BLE Battery Service (Bluetooth SIG)
 #define BATTERY_SERVICE_UUID    "180F"
 #define BATTERY_CHAR_UUID       "2A19"   // "Battery Level" characteristic
@@ -33,14 +32,20 @@
 #define NUS_TX_CHAR_UUID    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  // host notifies here
 
 
+#define CLIENT_WATCHDOG_MS 30000
 
 // ── Command bytes ─────────────────────────────────────────────────────────────
-#define CMD_START           0x01
-#define CMD_STOP            0x02
+enum class CMD : byte{
+    START,
+    STOP
+};
+const uint8_t SEND(CMD cmd); 
+const uint8_t CONF(CMD cmd); 
+const uint8_t ACK(CMD cmd); 
 
-// ── ACK bytes ─────────────────────────────────────────────────────────────────
-#define ACK_STARTED         0x11
-#define ACK_STOPPED         0x22
+const char* toString(uint8_t msg);
+
+#define AWAKE 0x99
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define DISCOVERY_TIMEOUT_MS  60000
@@ -53,12 +58,88 @@
 
 #define Max_TX_Power_db 9
 
-typedef enum {CAMERA_OFF, CAMERA_DISCONNECTED, CAMERA_READY, CAMERA_BOOTING, CAMERA_RECORDING, CAMERA_STOPPING, CAMERA_STOPPED} CameraState ;
-const String CameraStateString[] = {"OFF", "DISCONNECTED", "READY","BOOTING", "RECORDING", "STOPPING", "STOPPED"};
-CameraState camState = CAMERA_OFF;
 
-const char* HostMAC = "98:3d:ae:ab:a4:d6";
+enum class CameraState : byte {
+    OFF,
+    DISCONNECTED, 
+    READY, 
+    BOOTING, 
+    RECORDING, 
+    STOPPING, 
+    STOPPED,
+    WAIT_FOR_BOOT,
+    WAIT_FOR_STOP,
+};
+const char* toString(CameraState state);
 
-class BatteryFilter;
+enum class SystemState : byte {INITIAL_BOOT,WAIT_FOR_BUTTON_HOLD, WAIT_FOR_TIME, WAIT_FOR_BUTTON_RELEASE, WAIT_FOR_CONFIRMATION, SETUP, WIFI_CONNECTING, NTP_CONNECTION, BLUETOOTH_CONNECTING, RUNNING, INITIAL_SHUTDOWN, WAIT_FOR_SHUTDOWN_CONFIRMATION, SHUTDOWN, OFF, CHARGING};
+const char* toString(SystemState state);
+const char* dispString(SystemState state);
 
-#endif
+
+#define HostMAC "98:3d:ae:ab:a4:d6"
+
+
+
+
+// US18650VTC6
+static const float BATT_INTERNAl_RESISTANCE_mOhm = 30.0f;
+static const int BATT_TABLE_SIZE = 15;
+static const int BATT_VOLTAGE_TABLE[] = {280, 288, 297, 309, 324, 339, 347, 353, 364, 387, 403, 405, 409, 412, 417};
+static const int BATT_SOC_TABLE[] = {0, 1, 3, 6, 12, 21, 24, 31, 39, 67, 80, 84, 94, 97, 100};
+
+
+
+int stateOfCharge(int V100, int &i);
+
+class BatteryFilter {
+public:
+    BatteryFilter(float alpha = 0.05f) : _alpha(alpha), _initialized(false) {}
+
+    float update(float raw) {
+        if (!_initialized) {
+            _value = raw;
+            _initialized = true;
+        } else {
+            _value = _alpha * raw + (1.0f - _alpha) * _value;
+        }
+        return _value;
+    }
+
+    float value() const { return _value; }
+
+private:
+    float _alpha;
+    float _value = 0;
+    bool  _initialized;
+};
+
+
+class Battery {
+    public:
+        Battery() : _R_mOhm(BATT_INTERNAl_RESISTANCE_mOhm), V(0), V_c(0), I_mA(0), _i_soc(0), soc(0){}
+        float V;
+        float V_c;
+        float I;
+        int I_mA;
+        int soc;
+
+        void update(float V_new, float I_new){
+            V = _Vfilter.update(V_new);
+            I = _Ifilter.update(I_new);
+            I_mA = int(I * 1000);
+            V_c = V + I * float(_R_mOhm) / 1000000;
+            int V100 = int(V_c * 100);
+            soc = stateOfCharge(V100, _i_soc);
+        }
+
+        void update(float V){update(V, 0);}
+
+    private:
+        float _R_mOhm;
+        BatteryFilter _Vfilter;
+        BatteryFilter _Ifilter;
+        int _i_soc;
+
+
+};
