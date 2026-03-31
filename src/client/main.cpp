@@ -3,12 +3,171 @@
 #include <shared.h>
 #include <time.h>
 
+#include <HardwareSerial.h>
+#include <cstring>
+#include <cstdio>
+
 // At top of file, alongside your other state vars:
 Battery sysBatt;
 
 uint8_t battPctPrev;
 static NimBLECharacteristic* pBattChar  = nullptr;   // set during setup()
 #define BATT_UPDATE_INTERVAL_MS         10000         // every 5 seconds
+
+// ── UART config ───────────────────────────────────────────────────────────────
+#define RUNCAM_SERIAL   Serial1
+#define RUNCAM_BAUD     115200
+#define RUNCAM_RX_PIN   RX
+#define RUNCAM_TX_PIN   TX
+
+// ── Protocol constants ────────────────────────────────────────────────────────
+static const uint8_t RC_HEADER           = 0xCC;
+static const uint8_t RC_ERROR_HEADER     = 0x55;
+static const uint8_t CMD_GET_DEVICE_INFO = 0x00;
+static const uint8_t CMD_CAMERA_CONTROL  = 0x01;
+
+// Action IDs for CMD_CAMERA_CONTROL
+static const uint8_t ACTION_POWER_BTN    = 0x01;  // toggles start/stop recording
+static const uint8_t ACTION_CHANGE_MODE  = 0x02;  // cycles video ↔ QR/settings
+
+// Feature flags from GET_DEVICE_INFO (little-endian uint16)
+static const uint16_t FEAT_POWER_BTN     = (1 << 0);
+static const uint16_t FEAT_WIFI_BTN      = (1 << 1);
+static const uint16_t FEAT_CHANGE_MODE   = (1 << 2);
+static const uint16_t FEAT_5KEY_OSD      = (1 << 3);
+static const uint16_t FEAT_SETTINGS      = (1 << 4);  // advertised but NOT implemented
+static const uint16_t FEAT_DISPLAYPORT   = (1 << 5);  // advertised but NOT implemented
+static const uint16_t FEAT_START_REC     = (1 << 6);  // advertised but use POWER_BTN instead
+static const uint16_t FEAT_STOP_REC      = (1 << 7);
+
+// ── Timing ────────────────────────────────────────────────────────────────────
+static const uint32_t BTN_PRESS_DELAY_MS  = 300;
+static const uint32_t MODE_CHANGE_DELAY   = 600;
+static const uint32_t RX_TIMEOUT_MS       = 300;
+static const uint32_t RX_INTER_BYTE_MS    = 30;
+static const uint32_t INIT_RETRY_DELAY_MS = 1000;
+static const uint8_t  INIT_MAX_RETRIES    = 10;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+static bool     g_cameraReady    = false;
+static bool     g_isRecording    = false;
+static uint16_t g_cameraFeatures = 0;
+static uint8_t  g_protocolVer    = 0;
+// ── CRC-8 poly 0xD5 ──────────────────────────────────────────────────────────
+uint8_t crc8(const uint8_t *data, size_t len) {
+    uint8_t crc = 0x00;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (uint8_t b = 0; b < 8; b++) {
+            crc = (crc & 0x80) ? ((crc << 1) ^ 0xD5) : (crc << 1);
+        }
+    }
+    return crc;
+}
+
+void drainRx() {
+    uint32_t deadline = millis() + 20;
+    while (millis() < deadline) {
+        if (RUNCAM_SERIAL.available()) {
+            RUNCAM_SERIAL.read();
+            deadline = millis() + 5;
+        }
+    }
+}
+
+void sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen) {
+    uint8_t buf[32];
+    size_t totalLen = 2 + payloadLen;
+    if (totalLen + 1 > sizeof(buf)) { Serial.println("[ERR] Packet too large"); return; }
+    buf[0] = RC_HEADER;
+    buf[1] = cmd;
+    for (size_t i = 0; i < payloadLen; i++) buf[2 + i] = payload[i];
+    buf[totalLen] = crc8(buf, totalLen);
+    drainRx();
+    RUNCAM_SERIAL.write(buf, totalLen + 1);
+    RUNCAM_SERIAL.flush();
+}
+
+size_t receivePacket(uint8_t *buf, size_t maxLen) {
+    size_t count = 0;
+    uint32_t deadline = millis() + RX_TIMEOUT_MS;
+    while (millis() < deadline && count < maxLen) {
+        if (RUNCAM_SERIAL.available()) {
+            buf[count++] = (uint8_t)RUNCAM_SERIAL.read();
+            deadline = millis() + RX_INTER_BYTE_MS;
+        }
+    }
+    return count;
+}
+
+bool isValidResponse(const uint8_t *buf, size_t len, size_t expectedLen) {
+    if (len < expectedLen)    return false;
+    if (buf[0] != RC_HEADER)  return false;
+    return buf[len - 1] == crc8(buf, len - 1);
+}
+
+// ── GET_DEVICE_INFO (0x00) ────────────────────────────────────────────────────
+bool getDeviceInfo() {
+    sendPacket(CMD_GET_DEVICE_INFO, nullptr, 0);
+    uint8_t resp[5];
+    size_t n = receivePacket(resp, sizeof(resp));
+    if (!isValidResponse(resp, n, 5)) return false;
+    g_protocolVer    = resp[1];
+    g_cameraFeatures = (uint16_t)resp[2] | ((uint16_t)resp[3] << 8);
+    return true;
+}
+
+// ── Recovery ──────────────────────────────────────────────────────────────────
+bool recoverCamera() {
+    for (uint8_t i = 0; i < 8; i++) {
+        delay(1000);
+        if (getDeviceInfo()) {
+            g_cameraReady = true;
+            g_isRecording = false;
+            return true;
+        }
+    }
+    g_cameraReady = false;
+    return false;
+}
+
+// ── Camera control ────────────────────────────────────────────────────────────
+void sendCameraControl(uint8_t action, uint32_t postDelayMs = BTN_PRESS_DELAY_MS) {
+    sendPacket(CMD_CAMERA_CONTROL, &action, 1);
+    delay(postDelayMs);
+    drainRx();
+}
+void toggleRecording() {
+    sendCameraControl(ACTION_POWER_BTN);
+    g_isRecording = !g_isRecording;
+}
+
+void startRecording(){
+    if (g_isRecording) return;
+    toggleRecording();
+}
+
+void stopRecording(){
+    if (!g_isRecording) return;
+    toggleRecording();
+}
+
+void changeMode() {
+    sendCameraControl(ACTION_CHANGE_MODE, MODE_CHANGE_DELAY);
+    g_isRecording = false;
+}
+bool initCamera() {
+    for (uint8_t i = 0; i < INIT_MAX_RETRIES; i++) {
+        if (getDeviceInfo()) {
+            g_cameraReady = true;
+            g_isRecording = false;
+            return true;
+        }
+        delay(INIT_RETRY_DELAY_MS);
+    }
+    return false;
+}
+
 
 // ── State ─────────────────────────────────────────────────────────────────────
 static NimBLEServer*         pServer    = nullptr;
@@ -75,19 +234,21 @@ void updateState(){
         case CameraState::OFF:{
             if (shouldRecord) {
                 // send_CONF(CMD::START);
-                changeTo(CameraState::BOOTING);
+                changeTo(CameraState::WAIT_FOR_BOOT);
                 break;
             }
             break;
         }
+        case CameraState::WAIT_FOR_BOOT:{
+            if (!shouldRecord) changeTo(CameraState::STOPPING); break;
+            if (initCamera())changeTo(CameraState::BOOTING);break;
+            recoverCamera();
+            break;
+        }
         case CameraState::BOOTING:{
-            if (!shouldRecord) {
-                // send_CONF(CMD::STOP);
-                changeTo(CameraState::STOPPING);
-                break;
-            }
-            if ((timestamps.now - timestamps.camera)>2000){
-                // send_ACK(CMD::START);
+            if (!shouldRecord) changeTo(CameraState::STOPPING); break;
+            if ((timestamps.now - timestamps.camera)>1000);{
+                startRecording();
                 changeTo(CameraState::RECORDING);
             }
             break;
@@ -107,10 +268,8 @@ void updateState(){
                 changeTo(CameraState::BOOTING);
                 break;
             }
-            if ((timestamps.now - timestamps.camera)>3000){ 
-                // send_ACK(CMD::STOP);
-                changeTo(CameraState::STOPPED);
-            }
+            stopRecording();
+            if (!initCamera()) changeTo(CameraState::STOPPED);
 
             break;
         }
@@ -237,6 +396,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 void setup() {
     Serial.begin(BAUD);
     delay(INITIAL_DELAY);
+    RUNCAM_SERIAL.begin(RUNCAM_BAUD, SERIAL_8N1, RUNCAM_RX_PIN, RUNCAM_TX_PIN);
+
     timestamps.now = millis();
     timestamps.battery = timestamps.now;
     timestamps.camera = timestamps.now;
