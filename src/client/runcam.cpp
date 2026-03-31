@@ -1,19 +1,37 @@
 /**
- * RunCam Thumb Pro W — Read Time Setting
- * =======================================
- * Tries two different commands to read the current camera time:
+ * RunCam Thumb Pro W — ESP32-C3 UART Controller (final)
+ * =======================================================
+ * Verified command support for firmware v1, features=0x0077:
  *
- *  1. GET_SETTINGS (0x10) with parent ID = 0 (root scan)
- *     → returns all top-level settings as [id | name\0 | value\0] triplets
- *     → the value for ID 6 will reveal the exact format the camera uses
+ *  ✓  GET_DEVICE_INFO  (0x00) — works, returns features=0x0077
+ *  ✓  CAMERA_CONTROL   (0x01) ACTION_POWER_BTN   (0x01) — toggles start/stop recording
+ *  ✓  CAMERA_CONTROL   (0x01) ACTION_CHANGE_MODE (0x02) — cycles video ↔ QR/settings
  *
- *  2. GET_SETTINGS (0x10) with parent ID = 6 directly
- *     → in case ID 6 is a folder with sub-settings
+ *  ✗  GET_SETTINGS        (0x10) — returns 0x55 error, not implemented
+ *  ✗  READ_SETTING_DETAIL (0x11) — returns 0x55 error, not implemented
+ *  ✗  WRITE_SETTING       (0x13) — locks up UART parser, do not use
  *
- *  3. READ_SETTING_DETAIL (0x11) with ID 6
- *     → already known to return 0x55 error, but included for completeness
+ *  The SETTINGS_ACCESS bit in the feature flags is advertised but the entire
+ *  settings subsystem is unimplemented. Every settings command returns the
+ *  same blanket error: 0x55 0x05 0xFF 0x02 0x1A (error_code=0x02).
+ *  Set date/time via the RunCam WiFi app instead.
  *
- * Also includes the working recording control from v7.
+ * Error response format (0x55 header):
+ *  [0x55 | 0x05 | 0xFF | error_code | crc8]  — camera alive, command rejected
+ *
+ * LED states:
+ *  Solid red       = standby (ready to record)
+ *  Slow red flash  = recording
+ *  Green           = QR/settings mode
+ *  Off             = powered down
+ *
+ * Wiring (XIAO ESP32-C3 ↔ RunCam 1.25mm 4P):
+ *  RunCam TX → GPIO20 (UART1 RX)
+ *  RunCam RX → GPIO21 (UART1 TX)
+ *  RunCam GND → GND
+ *  RunCam 5V  → 5V supply (NOT 3.3V)
+ *
+ * Baud: 115200, 8N1
  */
 
 #include <Arduino.h>
@@ -21,48 +39,59 @@
 #include <cstring>
 #include <cstdio>
 
+// ── UART config ───────────────────────────────────────────────────────────────
 #define RUNCAM_SERIAL   Serial1
 #define RUNCAM_BAUD     115200
 #define RUNCAM_RX_PIN   20
 #define RUNCAM_TX_PIN   21
 
-static const uint8_t RC_HEADER              = 0xCC;
-static const uint8_t RC_ERROR_HEADER        = 0x55;
-static const uint8_t CMD_GET_DEVICE_INFO    = 0x00;
-static const uint8_t CMD_CAMERA_CONTROL     = 0x01;
-static const uint8_t CMD_GET_SETTINGS       = 0x10;
-static const uint8_t CMD_READ_SETTING_DETAIL = 0x11;
-static const uint8_t CMD_WRITE_SETTING      = 0x13;
+// ── Protocol constants ────────────────────────────────────────────────────────
+static const uint8_t RC_HEADER           = 0xCC;
+static const uint8_t RC_ERROR_HEADER     = 0x55;
+static const uint8_t CMD_GET_DEVICE_INFO = 0x00;
+static const uint8_t CMD_CAMERA_CONTROL  = 0x01;
 
-static const uint8_t ACTION_POWER_BTN       = 0x01;
-static const uint8_t ACTION_CHANGE_MODE     = 0x02;
-static const uint8_t SETTING_CAMERA_TIME    = 6;
+// Action IDs for CMD_CAMERA_CONTROL
+static const uint8_t ACTION_POWER_BTN    = 0x01;  // toggles start/stop recording
+static const uint8_t ACTION_CHANGE_MODE  = 0x02;  // cycles video ↔ QR/settings
 
-static const uint32_t BTN_PRESS_DELAY_MS    = 300;
-static const uint32_t MODE_CHANGE_DELAY     = 600;
-// Longer timeout for settings responses — they can be chunked
-static const uint32_t RX_TIMEOUT_MS         = 800;
-static const uint32_t RX_INTER_BYTE_MS      = 40;
+// Feature flags from GET_DEVICE_INFO (little-endian uint16)
+static const uint16_t FEAT_POWER_BTN     = (1 << 0);
+static const uint16_t FEAT_WIFI_BTN      = (1 << 1);
+static const uint16_t FEAT_CHANGE_MODE   = (1 << 2);
+static const uint16_t FEAT_5KEY_OSD      = (1 << 3);
+static const uint16_t FEAT_SETTINGS      = (1 << 4);  // advertised but NOT implemented
+static const uint16_t FEAT_DISPLAYPORT   = (1 << 5);  // advertised but NOT implemented
+static const uint16_t FEAT_START_REC     = (1 << 6);  // advertised but use POWER_BTN instead
+static const uint16_t FEAT_STOP_REC      = (1 << 7);
 
+// ── Timing ────────────────────────────────────────────────────────────────────
+static const uint32_t BTN_PRESS_DELAY_MS  = 300;
+static const uint32_t MODE_CHANGE_DELAY   = 600;
+static const uint32_t RX_TIMEOUT_MS       = 300;
+static const uint32_t RX_INTER_BYTE_MS    = 30;
+static const uint32_t INIT_RETRY_DELAY_MS = 1000;
+static const uint8_t  INIT_MAX_RETRIES    = 10;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+static bool     g_cameraReady    = false;
 static bool     g_isRecording    = false;
 static uint16_t g_cameraFeatures = 0;
+static uint8_t  g_protocolVer    = 0;
 
 // ── Forward declarations ──────────────────────────────────────────────────────
-uint8_t  crc8(const uint8_t *data, size_t len);
-void     drainRx();
-void     sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen);
-size_t   receivePacket(uint8_t *buf, size_t maxLen);
-void     printPacketHex(const char *prefix, const uint8_t *buf, size_t len);
-bool     isErrorResponse(const uint8_t *buf, size_t len);
-bool     isValidResponse(const uint8_t *buf, size_t len);
-bool     getDeviceInfo();
-void     sendCameraControl(uint8_t action, uint32_t postDelayMs);
-bool     startRecording();
-bool     stopRecording();
-void     getSettingsAtID(uint8_t parentId);
-void     readSettingDetail(uint8_t settingId);
-void     scanAllSettings();
-bool     initCamera();
+uint8_t crc8(const uint8_t *data, size_t len);
+void    drainRx();
+void    sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen);
+size_t  receivePacket(uint8_t *buf, size_t maxLen);
+bool    isValidResponse(const uint8_t *buf, size_t len, size_t expectedLen);
+bool    getDeviceInfo();
+bool    recoverCamera();
+void    sendCameraControl(uint8_t action, uint32_t postDelayMs);
+bool    startRecording();
+bool    stopRecording();
+void    toggleRecording();
+bool    initCamera();
 
 // ── CRC-8 poly 0xD5 ──────────────────────────────────────────────────────────
 uint8_t crc8(const uint8_t *data, size_t len) {
@@ -87,14 +116,13 @@ void drainRx() {
 }
 
 void sendPacket(uint8_t cmd, const uint8_t *payload, size_t payloadLen) {
-    uint8_t buf[64];
+    uint8_t buf[32];
     size_t totalLen = 2 + payloadLen;
     if (totalLen + 1 > sizeof(buf)) { Serial.println("[ERR] Packet too large"); return; }
     buf[0] = RC_HEADER;
     buf[1] = cmd;
     for (size_t i = 0; i < payloadLen; i++) buf[2 + i] = payload[i];
     buf[totalLen] = crc8(buf, totalLen);
-    printPacketHex("[TX]", buf, totalLen + 1);
     drainRx();
     RUNCAM_SERIAL.write(buf, totalLen + 1);
     RUNCAM_SERIAL.flush();
@@ -109,296 +137,161 @@ size_t receivePacket(uint8_t *buf, size_t maxLen) {
             deadline = millis() + RX_INTER_BYTE_MS;
         }
     }
-    if (count > 0) printPacketHex("[RX]", buf, count);
-    else           Serial.println("[RX] (none)");
     return count;
 }
 
-void printPacketHex(const char *prefix, const uint8_t *buf, size_t len) {
-    Serial.print(prefix);
-    for (size_t i = 0; i < len; i++) Serial.printf(" 0x%02X", buf[i]);
-    // Also print any printable ASCII inline
-    Serial.print("  |");
-    for (size_t i = 0; i < len; i++) {
-        char c = (char)buf[i];
-        Serial.print((c >= 0x20 && c < 0x7F) ? c : '.');
-    }
-    Serial.println("|");
-}
-
-bool isErrorResponse(const uint8_t *buf, size_t len) {
-    if (len < 2) return false;
-    return buf[0] == RC_ERROR_HEADER;
-}
-
-bool isValidResponse(const uint8_t *buf, size_t len) {
-    if (len < 2) return false;
-    if (buf[0] != RC_HEADER) return false;
+bool isValidResponse(const uint8_t *buf, size_t len, size_t expectedLen) {
+    if (len < expectedLen)    return false;
+    if (buf[0] != RC_HEADER)  return false;
     return buf[len - 1] == crc8(buf, len - 1);
 }
 
-// ── GET_DEVICE_INFO ───────────────────────────────────────────────────────────
+// ── GET_DEVICE_INFO (0x00) ────────────────────────────────────────────────────
 bool getDeviceInfo() {
-    Serial.println("[CMD] GET_DEVICE_INFO");
     sendPacket(CMD_GET_DEVICE_INFO, nullptr, 0);
     uint8_t resp[5];
     size_t n = receivePacket(resp, sizeof(resp));
-    if (!isValidResponse(resp, n)) { Serial.println("[WARN] No valid response"); return false; }
+    if (!isValidResponse(resp, n, 5)) return false;
+    g_protocolVer    = resp[1];
     g_cameraFeatures = (uint16_t)resp[2] | ((uint16_t)resp[3] << 8);
-    Serial.printf("[INFO] Protocol v%u  Features=0x%04X\n", resp[1], g_cameraFeatures);
     return true;
 }
 
+// ── Recovery ──────────────────────────────────────────────────────────────────
+bool recoverCamera() {
+    for (uint8_t i = 0; i < 8; i++) {
+        delay(1000);
+        if (getDeviceInfo()) {
+            g_cameraReady = true;
+            g_isRecording = false;
+            return true;
+        }
+    }
+    g_cameraReady = false;
+    return false;
+}
+
+// ── Camera control ────────────────────────────────────────────────────────────
 void sendCameraControl(uint8_t action, uint32_t postDelayMs = BTN_PRESS_DELAY_MS) {
     sendPacket(CMD_CAMERA_CONTROL, &action, 1);
     delay(postDelayMs);
     drainRx();
 }
 
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Start video recording.
+ * Camera must be in standby (solid red LED).
+ * Returns false if already recording.
+ */
 bool startRecording() {
-    if (g_isRecording) { Serial.println("[WARN] Already recording"); return false; }
+    if (g_isRecording) return false;
     sendCameraControl(ACTION_POWER_BTN);
     g_isRecording = true;
-    Serial.println("[INFO] Recording STARTED");
     return true;
 }
 
+/**
+ * Stop video recording.
+ * Returns false if not currently recording.
+ */
 bool stopRecording() {
-    if (!g_isRecording) { Serial.println("[WARN] Not recording"); return false; }
+    if (!g_isRecording) return false;
     sendCameraControl(ACTION_POWER_BTN);
     g_isRecording = false;
-    Serial.println("[INFO] Recording STOPPED");
     return true;
 }
 
-// ── GET_SETTINGS (0x10) ───────────────────────────────────────────────────────
 /**
- * Requests sub-settings under parentId, reading all chunks.
- *
- * Request:  [0xCC | 0x10 | parent_id | chunk_index | crc]
- * Response: [0xCC | remaining_chunks | data_length | {id, name\0, value\0}... | crc]
- *
- * Prints each setting's ID, name, and current value string.
- * The value of SETTINGID_DISP_CAMERA_TIME (ID 6) reveals the time format.
+ * Toggle recording state.
+ * Starts if idle, stops if recording.
  */
-void getSettingsAtID(uint8_t parentId) {
-    Serial.printf("\n[CMD] GET_SETTINGS parent_id=%u\n", parentId);
-
-    uint8_t chunk = 0;
-    uint8_t remaining = 0;
-
-    do {
-        uint8_t payload[2] = { parentId, chunk };
-        sendPacket(CMD_GET_SETTINGS, payload, 2);
-
-        // Response can be large — use a generous buffer
-        uint8_t resp[128];
-        size_t n = receivePacket(resp, sizeof(resp));
-
-        if (n == 0) {
-            Serial.println("[WARN] No response");
-            return;
-        }
-        if (isErrorResponse(resp, n)) {
-            Serial.printf("[WARN] Error response (0x55) for parent_id=%u chunk=%u\n",
-                          parentId, chunk);
-            return;
-        }
-        if (!isValidResponse(resp, n)) {
-            Serial.println("[WARN] Invalid response (bad header or CRC)");
-            return;
-        }
-
-        // Parse response structure:
-        // resp[0] = 0xCC (header)
-        // resp[1] = remaining_chunks
-        // resp[2] = data_length (from resp[3] to resp[n-2], i.e. excluding header, remaining, dataLen, crc)
-        // resp[3..n-2] = settings data
-        // resp[n-1] = crc
-
-        remaining   = resp[1];
-        uint8_t dataLen = resp[2];
-
-        Serial.printf("[INFO] Chunk %u, remaining=%u, data_length=%u\n",
-                      chunk, remaining, dataLen);
-
-        // Walk through settings data: each entry is [setting_id | name\0 | value\0]
-        size_t pos = 3;  // start of data (after header, remaining, dataLen)
-        size_t dataEnd = 3 + dataLen;
-        if (dataEnd > n - 1) dataEnd = n - 1;  // guard against overflow, stop before CRC
-
-        while (pos < dataEnd) {
-            // Setting ID
-            uint8_t settingId = resp[pos++];
-            if (pos >= dataEnd) break;
-
-            // Setting name (null-terminated string)
-            char name[64] = {};
-            size_t ni = 0;
-            while (pos < dataEnd && resp[pos] != 0x00 && ni < sizeof(name) - 1) {
-                name[ni++] = (char)resp[pos++];
-            }
-            if (pos < dataEnd) pos++;  // consume null terminator
-
-            // Setting value (null-terminated string)
-            char value[64] = {};
-            size_t vi = 0;
-            while (pos < dataEnd && resp[pos] != 0x00 && vi < sizeof(value) - 1) {
-                value[vi++] = (char)resp[pos++];
-            }
-            if (pos < dataEnd) pos++;  // consume null terminator
-
-            Serial.printf("  [ID=%2u] %-30s = \"%s\"\n", settingId, name, value);
-
-            // Highlight the time setting
-            if (settingId == SETTING_CAMERA_TIME) {
-                Serial.printf("  ^^^ THIS IS THE CAMERA TIME (ID 6) — format is: \"%s\"\n", value);
-            }
-        }
-
-        chunk++;
-    } while (remaining > 0);
+void toggleRecording() {
+    if (g_isRecording) stopRecording(); else startRecording();
 }
 
-// ── READ_SETTING_DETAIL (0x11) ────────────────────────────────────────────────
 /**
- * Requests the detail of a single setting (type, min/max, current value, etc).
- * For STRING type: returns max_string_size.
- * Already known to return 0x55 for ID 6, but try anyway in case other IDs work.
+ * Cycle to the next camera mode (video standby → QR/settings → video standby).
+ * Resets recorded state tracking since mode change invalidates it.
  */
-void readSettingDetail(uint8_t settingId) {
-    Serial.printf("\n[CMD] READ_SETTING_DETAIL id=%u\n", settingId);
-
-    uint8_t payload[2] = { settingId, 0x00 };
-    sendPacket(CMD_READ_SETTING_DETAIL, payload, 2);
-
-    uint8_t resp[64];
-    size_t n = receivePacket(resp, sizeof(resp));
-
-    if (n == 0) { Serial.println("[WARN] No response"); return; }
-
-    if (isErrorResponse(resp, n)) {
-        if (n >= 5) Serial.printf("[WARN] Error 0x55: error_code=0x%02X\n", resp[3]);
-        else        Serial.println("[WARN] Error 0x55 (short)");
-        return;
-    }
-
-    if (!isValidResponse(resp, n)) { Serial.println("[WARN] Invalid response"); return; }
-
-    // resp[1] = remaining_chunks
-    // resp[2] = data_length
-    // resp[3] = setting_type
-    uint8_t settingType = resp[3];
-    const char *typeName = "unknown";
-    switch (settingType) {
-        case 0:  typeName = "UINT8";          break;
-        case 1:  typeName = "INT8";           break;
-        case 2:  typeName = "UINT16";         break;
-        case 3:  typeName = "INT16";          break;
-        case 8:  typeName = "FLOAT";          break;
-        case 9:  typeName = "TEXT_SELECTION"; break;
-        case 10: typeName = "STRING";         break;
-        case 11: typeName = "FOLDER";         break;
-        case 12: typeName = "INFO";           break;
-    }
-    Serial.printf("[INFO] setting_type = 0x%02X (%s)\n", settingType, typeName);
-
-    if (settingType == 10) {  // STRING
-        // Find null terminator of current value starting at resp[4]
-        size_t pos = 4;
-        char curVal[64] = {};
-        size_t vi = 0;
-        while (pos < n - 1 && resp[pos] != 0x00 && vi < sizeof(curVal) - 1) {
-            curVal[vi++] = (char)resp[pos++];
-        }
-        if (pos < n - 1) pos++;  // consume null
-        Serial.printf("[INFO] current value = \"%s\"\n", curVal);
-
-        if (pos < n - 1) {
-            uint8_t maxStrSize = resp[pos];
-            Serial.printf("[INFO] max_string_size = %u\n", maxStrSize);
-        }
-    }
+void changeMode() {
+    sendCameraControl(ACTION_CHANGE_MODE, MODE_CHANGE_DELAY);
+    g_isRecording = false;
 }
 
-// ── Scan root settings then ID 6 specifically ────────────────────────────────
-void scanAllSettings() {
-    Serial.println("\n========================================");
-    Serial.println("Scanning root settings (parent_id=0)...");
-    Serial.println("========================================");
-    getSettingsAtID(0);
-
-    Serial.println("\n========================================");
-    Serial.println("Scanning ID 6 as parent (sub-settings)...");
-    Serial.println("========================================");
-    getSettingsAtID(6);
-
-    Serial.println("\n========================================");
-    Serial.println("READ_SETTING_DETAIL for ID 6...");
-    Serial.println("========================================");
-    readSettingDetail(6);
-
-    // Also try IDs 0-10 with READ_SETTING_DETAIL to see what responds
-    Serial.println("\n========================================");
-    Serial.println("READ_SETTING_DETAIL for IDs 0-10...");
-    Serial.println("========================================");
-    for (uint8_t id = 0; id <= 10; id++) {
-        Serial.printf("\n--- ID %u ---\n", id);
-        readSettingDetail(id);
-        delay(200);
-        // Quick alive check every 3 IDs
-        if (id % 3 == 2) {
-            if (!getDeviceInfo()) {
-                Serial.println("[WARN] Camera not responding — waiting 3s...");
-                delay(3000);
-                getDeviceInfo();
-            }
-        }
-    }
+/**
+ * Returns true if the camera is ready to accept commands.
+ */
+bool isCameraReady() {
+    return g_cameraReady;
 }
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+/**
+ * Returns true if the camera is currently recording.
+ * Note: this is tracked locally — there is no way to query recording state
+ * from the camera over UART.
+ */
+bool isRecording() {
+    return g_isRecording;
+}
+
+// ── Initialisation ────────────────────────────────────────────────────────────
+
+/**
+ * Probe the camera and populate feature flags.
+ * Call once from setup() after a 3-second boot delay.
+ * Returns true if the camera was found and responded correctly.
+ */
 bool initCamera() {
-    for (uint8_t i = 1; i <= 10; i++) {
-        Serial.printf("[INFO] Probe %u/10\n", i);
-        if (getDeviceInfo()) return true;
-        delay(1000);
+    for (uint8_t i = 0; i < INIT_MAX_RETRIES; i++) {
+        if (getDeviceInfo()) {
+            g_cameraReady = true;
+            g_isRecording = false;
+            return true;
+        }
+        delay(INIT_RETRY_DELAY_MS);
     }
     return false;
 }
 
-// ── Entry points ──────────────────────────────────────────────────────────────
+// ── Example usage in setup/loop ───────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n=== RunCam Thumb Pro W — Setting Reader ===");
-    RUNCAM_SERIAL.begin(RUNCAM_BAUD, SERIAL_8N1, RUNCAM_RX_PIN, RUNCAM_TX_PIN);
-    Serial.println("[INFO] Waiting 3s for camera to boot...");
-    delay(3000);
-    initCamera();
 
-    Serial.println("\n[INFO] Commands:");
-    Serial.println("  a = scan ALL settings (root + ID6 + detail IDs 0-10)");
-    Serial.println("  g = GET_SETTINGS parent_id=0  (root scan)");
-    Serial.println("  6 = GET_SETTINGS parent_id=6  (time sub-settings)");
-    Serial.println("  d = READ_SETTING_DETAIL id=6  (time detail)");
-    Serial.println("  i = GET_DEVICE_INFO");
-    Serial.println("  s = start recording");
-    Serial.println("  x = stop recording");
+    RUNCAM_SERIAL.begin(RUNCAM_BAUD, SERIAL_8N1, RUNCAM_RX_PIN, RUNCAM_TX_PIN);
+
+    // Camera needs ~3s to boot before accepting UART commands
+    delay(3000);
+
+    if (initCamera()) {
+        Serial.printf("RunCam ready. Protocol v%u  Features=0x%04X\n",
+                      g_protocolVer, g_cameraFeatures);
+    } else {
+        Serial.println("RunCam not found — check wiring and power supply");
+    }
 }
 
 void loop() {
+    // Example: drive via Serial monitor
     if (Serial.available()) {
-        char c = (char)Serial.read();
-        switch (c) {
-            case 'a': scanAllSettings();          break;
-            case 'g': getSettingsAtID(0);         break;
-            case '6': getSettingsAtID(6);         break;
-            case 'd': readSettingDetail(6);       break;
-            case 'i': getDeviceInfo();            break;
-            case 's': startRecording();           break;
-            case 'x': stopRecording();            break;
-            default: break;
+        switch ((char)Serial.read()) {
+            case 's': startRecording();  break;
+            case 'x': stopRecording();   break;
+            case 't': toggleRecording(); break;
+            case 'm': changeMode();      break;
+            case 'i':
+                if (getDeviceInfo())
+                    Serial.printf("Camera alive. v%u  0x%04X  recording=%s\n",
+                                  g_protocolVer, g_cameraFeatures,
+                                  g_isRecording ? "yes" : "no");
+                else
+                    Serial.println("No response");
+                break;
+            case 'r':
+                Serial.println(recoverCamera() ? "Recovered" : "Recovery failed");
+                break;
         }
     }
 }
