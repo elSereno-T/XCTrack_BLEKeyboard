@@ -833,6 +833,10 @@ void clientState(int idx){
             if (recording) sendCmd(CMD::START, idx);
             break;
         }
+        case CameraState::WAIT_FOR_BOOT:{
+            if ((!recording) && (nToggles>0)) sendCmd(CMD::STOP, idx);
+            break;
+        }
         case CameraState::BOOTING:{
             if ((!recording) && (nToggles>0)) sendCmd(CMD::STOP, idx);
             break;

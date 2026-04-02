@@ -242,7 +242,6 @@ void updateState(){
         case CameraState::WAIT_FOR_BOOT:{
             if (!shouldRecord) changeTo(CameraState::STOPPING); break;
             if (initCamera())changeTo(CameraState::BOOTING);break;
-            recoverCamera();
             break;
         }
         case CameraState::BOOTING:{

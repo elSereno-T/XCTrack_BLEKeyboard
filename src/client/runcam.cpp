@@ -42,8 +42,8 @@
 // ── UART config ───────────────────────────────────────────────────────────────
 #define RUNCAM_SERIAL   Serial1
 #define RUNCAM_BAUD     115200
-#define RUNCAM_RX_PIN   20
-#define RUNCAM_TX_PIN   21
+#define RUNCAM_RX_PIN   RX
+#define RUNCAM_TX_PIN   TX
 
 // ── Protocol constants ────────────────────────────────────────────────────────
 static const uint8_t RC_HEADER           = 0xCC;
